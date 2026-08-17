@@ -34,7 +34,7 @@ atli invocation
 
 The `ToolRunner` seam is deliberate: it is the only module that knows the transport. If a future fastmcp release breaks in-memory clients, swapping to a subprocess stdio-MCP transport is a one-module change.
 
-Chosen over alternatives because in-process is fastest (~0.5–1 s startup, imports dominate) and preserves byte-identical tool output (preprocessing, formatting, error messages) — subprocess MCP costs 1.5–3 s per call; direct `JiraClient`/`ConfluenceClient` calls lose the tool layer and its 1:1 operation surface.
+Chosen over alternatives because in-process is the fastest workable option (startup dominated by the server import, ~4.5 s; no subprocess or JSON-RPC handshake on top) and preserves byte-identical tool output (preprocessing, formatting, error messages) — subprocess MCP adds 1.5–3 s per call on top of the same imports; direct `JiraClient`/`ConfluenceClient` calls lose the tool layer and its 1:1 operation surface.
 
 ## Command surface
 
@@ -89,9 +89,9 @@ CONFLUENCE_PERSONAL_TOKEN = "..."
 
 ## Runtime behavior
 
-- Every invocation imports `main_mcp`, opens one fastmcp in-memory client session, enumerates tools, builds the command tree, dispatches. One `asyncio.run()` per process.
-- No disk cache of tool metadata — in-process enumeration is sub-second and always fresh.
-- Unconfigured services (e.g. no `JIRA_URL`) fail at call time with the server's own error, surfaced verbatim.
+- Every invocation imports `main_mcp`, opens a fastmcp in-memory client session, enumerates tools, builds the command tree, dispatches. One `asyncio.run()` per process.
+- Startup is dominated by the server import (~4.5 s cold on the reference machine; enumeration and dispatch are near-instant). Accepted v1 cost — no daemon, no caching.
+- The server exposes tools **only for configured services**: with no `JIRA_URL` set, `jira_*` tools are absent from the enumeration entirely, so the CLI shows a "no services configured — set `JIRA_URL`/`CONFLUENCE_URL` or a profile" hint rather than a tool list. Missing credentials for a configured service surface at call time with the server's own error.
 - Server-side write protection env semantics apply unchanged; the CLI adds no second gate.
 
 ## Error handling & exit codes
