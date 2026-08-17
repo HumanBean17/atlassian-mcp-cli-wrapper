@@ -59,7 +59,14 @@ def _make_handler(spec: ToolSpec, dispatch: Dispatch) -> Callable[..., None]:
         inspect.Parameter(
             name=param.name,
             kind=inspect.Parameter.KEYWORD_ONLY,
-            annotation=param.type,
+            # Optional params with a None default must be annotated ``T | None``:
+            # cyclopts validates defaults with pydantic whenever pydantic is in
+            # sys.modules (always true here, fastmcp imports it), and
+            # ``TypeAdapter(str).validate_python(None)`` raises ValidationError —
+            # turning every tool invocation into a usage error (exit 2).
+            annotation=param.type
+            if param.required or param.default is not None
+            else param.type | None,
             default=param.default if not param.required else inspect.Parameter.empty,
         )
         for param in spec.params

@@ -91,6 +91,29 @@ def test_optional_none_excluded(capsys: pytest.CaptureFixture[str]) -> None:
     capsys.readouterr()
 
 
+def test_optional_none_default_with_pydantic_loaded(capsys: pytest.CaptureFixture[str]) -> None:
+    """A None-default optional param parses even when pydantic is loaded.
+
+    Production always imports pydantic (fastmcp) before parsing. cyclopts then
+    validates parameter *defaults* with ``pydantic.TypeAdapter``, so a plain
+    ``str`` annotation with a ``None`` default raises ValidationError and every
+    tool invocation would exit 2.
+    """
+    import pydantic  # noqa: F401  (cyclopts checks "pydantic" in sys.modules)
+
+    expand = ToolParam(name="expand", type=str, required=False, default=None)
+    comment_limit = ToolParam(name="comment_limit", type=int, required=False, default=10)
+    spy = DispatchSpy()
+    app = create_app([jira_get_issue_spec((ISSUE_KEY, expand, comment_limit))], spy)
+
+    invoke(app, ["jira", "get-issue", "--issue-key", "P"])
+
+    assert spy.calls == [
+        ("jira_get_issue", {"issue_key": "P", "comment_limit": 10})
+    ]
+    capsys.readouterr()
+
+
 def test_missing_required_is_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
     app = create_app([jira_get_issue_spec()], DispatchSpy())
 
