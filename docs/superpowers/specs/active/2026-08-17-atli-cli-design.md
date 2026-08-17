@@ -45,7 +45,7 @@ atli [--profile NAME] jira <tool> [flags]
 atli [--profile NAME] confluence <tool> [flags]
 ```
 
-- **Name mapping** (mechanical, no curation, no aliases): server tool `jira_get_issue` → command `atli jira get-issue`; argument `issue_key` → flag `--issue-key`. Namespace split follows the server's mounted prefixes (`jira_`, `confluence_`).
+- **Name mapping** (mechanical, no curation, no aliases): server tool `jira_get_issue` → command `atli jira get-issue`; argument `issue_key` → flag `--issue-key`. Namespace split follows the server's mounted prefixes (`jira_`, `confluence_`); any tool without a service prefix registers as a top-level command.
 - **Arguments**: generated from each tool's JSON Schema. Types `string`, `integer`, `number`, `boolean`, arrays — coerced by cyclopts. Required vs optional per schema; defaults shown in `--help`.
 - **`atli tools [--service]`**: one line per tool — name + first sentence of description. The agent's discovery surface (~95 lines) in place of ~95 schemas.
 - **`atli profiles`**: lists profile names, their service URLs, and the default. Never prints tokens or secrets.
