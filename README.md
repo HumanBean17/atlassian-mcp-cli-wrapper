@@ -10,7 +10,7 @@ automatically with pinned versions.
 atli tools                              # list what your credentials unlock
 atli jira get-issue --issue-key PROJ-1  # markdown, verbatim from the tool
 atli confluence search --query "deploy"
-atli --profile work jira search-jql --jql "assignee = currentUser()"
+atli --profile work jira search --jql "assignee = currentUser()"
 ```
 
 ## Install
