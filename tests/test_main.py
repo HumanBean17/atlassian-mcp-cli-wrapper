@@ -194,6 +194,21 @@ def test_main_unknown_profile_exit_2(
     assert out == ""
 
 
+def test_main_empty_profile_value_exit_2(
+    stub_app, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--profile \"\"` must error, not silently use the default profile."""
+    (tmp_path / ".atli.toml").write_text(CORP_TOML)
+    monkeypatch.chdir(tmp_path)
+
+    code = main(["--profile", "", "jira", "get-issue"], runner_factory=stub_factory(stub_app))
+    out, err = capsys.readouterr()
+
+    assert code == 2
+    assert "requires a profile name" in err
+    assert out == ""
+
+
 def test_main_tools_hint_when_empty(capsys: pytest.CaptureFixture[str]) -> None:
     from fastmcp import FastMCP
 

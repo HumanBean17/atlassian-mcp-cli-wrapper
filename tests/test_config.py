@@ -216,10 +216,22 @@ def test_extract_flag_errors():
         extract_profile_flag(["--profile="])
     with pytest.raises(ConfigError):
         extract_profile_flag(["--profile", "--verbose", "jira"])
+    # The empty space form must fail exactly like `--profile=`, not silently
+    # fall through to the default profile's instance.
+    with pytest.raises(ConfigError):
+        extract_profile_flag(["--profile", "", "jira", "get-issue"])
     assert extract_profile_flag(["--profile", "a", "--profile", "b", "jira"]) == (
         "b",
         ["jira"],
     )
+
+
+def test_resolve_empty_flag_name_is_error(tmp_path):
+    """Belt and braces: a non-None empty flag must not fall back to
+    $ATLI_PROFILE / default_profile via `flag or ...` truthiness."""
+    config = load_config_from_text(tmp_path, CORP_TOML)
+    with pytest.raises(ConfigError):
+        resolve_profile_name("", config, {"ATLI_PROFILE": "corp"})
 
 
 def test_describe_profiles_hides_secrets(tmp_path):

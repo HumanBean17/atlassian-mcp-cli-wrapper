@@ -150,7 +150,13 @@ def resolve_profile_name(
     config: AtliConfig,
     env: Mapping[str, str],
 ) -> str | None:
-    """Return the profile to use: ``flag`` > ``$ATLI_PROFILE`` > config default."""
+    """Return the profile to use: ``flag`` > ``$ATLI_PROFILE`` > config default.
+
+    An explicitly empty ``flag`` is an error, not "unset": ``atli --profile ""
+    jira get-issue`` must not silently target the default profile's instance.
+    """
+    if flag == "":
+        raise ConfigError(f"--profile requires a profile name. {_PROFILE_USAGE}")
     name = flag or env.get("ATLI_PROFILE") or config.default_profile
     if name is None:
         return None
@@ -219,6 +225,8 @@ def extract_profile_flag(argv: list[str]) -> tuple[str | None, list[str]]:
                     f"--profile requires a profile name. {_PROFILE_USAGE}"
                 )
             value = argv[index + 1]
+            if not value:
+                raise ConfigError(f"--profile requires a profile name. {_PROFILE_USAGE}")
             index += 2
         elif token.startswith("--profile="):
             name = token.partition("=")[2]
