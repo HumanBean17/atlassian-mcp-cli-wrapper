@@ -15,15 +15,19 @@ atli --profile work jira search --jql "assignee = currentUser()"
 
 ## Install
 
+From a checkout (the package is not on PyPI):
+
 ```console
-$ pipx install mcp-atlassian-cli          # isolated, recommended
+$ git clone <this-repo> && cd mcp-atlassian-cli
+$ python -m venv .venv
+$ .venv/bin/pip install -e .
+$ .venv/bin/atli tools
 ```
 
-or, from a checkout:
+Once published on PyPI, an isolated install will also work:
 
 ```console
-$ python -m venv .venv && . .venv/bin/activate
-$ pip install -e .
+$ pipx install mcp-atlassian-cli
 ```
 
 Requires Python 3.11+. The package pins `mcp-atlassian>=0.23,<0.24` (which
@@ -49,7 +53,7 @@ Notes:
 - On Data Center/Server, the personal token is created under *Profile → Personal Access Tokens*.
 - Data Center/Server also accepts username + API token via the same
   `*_USERNAME`/`*_API_TOKEN` variables if basic auth is enabled.
-- `*URL` may include `/wiki` for Confluence. The URL decides Cloud vs Data Center: hosts ending in `.atlassian.net` (also `.jira.com`, `.atlassian.com`, the US-Gov domains) mean Cloud; everything else, including `localhost` and private IPs, means Data Center/Server.
+- `*URL` may include `/wiki` for Confluence. The URL decides Cloud vs Data Center: hosts ending in `.atlassian.net` (also `.jira.com`, `.jira-dev.com`, `.atlassian.com`, and exact-match `api.atlassian.com`, plus the US-Gov domains) mean Cloud; everything else, including `localhost` and private IPs, means Data Center/Server.
 
 ```console
 $ export JIRA_URL="https://your-company.atlassian.net"

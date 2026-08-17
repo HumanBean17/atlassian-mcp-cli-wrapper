@@ -55,16 +55,17 @@ def main(
     try:
         runner = (runner_factory or ToolRunner)()
         specs = runner.list_tool_specs()
-        profiles_text = config.describe_profiles(config_data, profile_name)
+        profiles_text = (
+            None
+            if config_data.path is None
+            else config.describe_profiles(config_data, profile_name)
+        )
         app = create_app(specs, runner.call_tool, profiles_text)
         app(rest_argv, exit_on_error=False, print_error=False)
     except CycloptsError as error:
         print(error, file=sys.stderr)
         return 2
-    except ToolCallFailure as error:
-        print(error, file=sys.stderr)
-        return 1
-    except ToolRunnerError as error:
+    except (ToolCallFailure, ToolRunnerError) as error:
         print(error, file=sys.stderr)
         return 1
     except SystemExit as error:

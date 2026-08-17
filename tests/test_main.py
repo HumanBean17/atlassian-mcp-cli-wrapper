@@ -207,6 +207,24 @@ def test_main_profiles_command(
     assert err == ""
 
 
+def test_main_profiles_no_config_file(
+    stub_app,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No config file anywhere -> `atli profiles` says so (not 'No profiles
+    configured'), because that is distinguishable and the more useful answer."""
+    monkeypatch.chdir(tmp_path)
+
+    code = main(["profiles"], runner_factory=stub_factory(stub_app))
+    out, err = capsys.readouterr()
+
+    assert code == 0
+    assert out.splitlines() == ["No config file found."]
+    assert err == ""
+
+
 def test_no_server_import_at_module_import() -> None:
     """Importing main must never pull mcp_atlassian before the env is applied."""
     code = (
