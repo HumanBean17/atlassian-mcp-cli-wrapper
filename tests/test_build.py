@@ -186,6 +186,48 @@ def test_tools_command_listing(capsys: pytest.CaptureFixture[str]) -> None:
     ]
 
 
+def test_tools_listing_one_line_per_tool(capsys: pytest.CaptureFixture[str]) -> None:
+    """66 of 98 real descriptions end their first sentence with ``.\\n\\n``, so a
+    ``". "``-only split prints the whole multi-paragraph description and blank
+    lines wreck the aligned table. The listing must be exactly one physical line
+    per tool: first line of the description, then the first sentence of that."""
+    app = create_app(
+        [
+            jira_get_issue_spec(
+                description="Get an issue.\n\nLong second paragraph with more detail."
+            ),
+            ToolSpec(
+                tool_name="jira_search",
+                service="jira",
+                command_name="search",
+                description="Returns issues matching a query\n\nDetails.",
+                params=(ToolParam(name="jql", type=str, required=True, default=None),),
+            ),
+        ],
+        DispatchSpy(),
+    )
+
+    invoke(app, ["tools"])
+
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 2
+    assert lines[0].count("Get an issue.") == 1
+    assert "second paragraph" not in lines[0]
+    assert lines[1].count("Returns issues matching a query") == 1
+    assert "Details." not in lines[1]
+
+
+def test_first_sentence_takes_first_line() -> None:
+    from mcp_atlassian_cli.build import _first_sentence
+
+    assert _first_sentence("Two. Sentences. On one line.\n\nRest") == (
+        "Two. "
+    )
+    assert _first_sentence("No period at all\n\nDetails.") == "No period at all"
+    assert _first_sentence("") == "(no description)"
+    assert _first_sentence("Single line only.") == "Single line only."
+
+
 def test_profiles_command(capsys: pytest.CaptureFixture[str]) -> None:
     app = create_app([], DispatchSpy(), profiles_text="* corp (default)")
     invoke(app, ["profiles"])

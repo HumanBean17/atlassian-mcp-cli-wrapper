@@ -28,11 +28,19 @@ for a tool's parameters and defaults.
 
 
 def _first_sentence(description: str) -> str:
-    """Return the description up to and including the first ``". "``."""
+    """Return the first line of the description, up to its first ``". "``.
+
+    Real mcp-atlassian descriptions are multi-paragraph docstrings whose first
+    sentence usually ends ``".\\n\\n"`` rather than ``". "`` — splitting only on
+    ``". "`` would print the whole docstring and its blank lines, wrecking the
+    one-line-per-tool table. So: take the first physical line, then the first
+    sentence within that line.
+    """
     if not description:
         return "(no description)"
-    head, sep, _rest = description.partition(". ")
-    return head + sep if sep else description
+    first_line = description.split("\n", 1)[0].rstrip()
+    head, sep, _rest = first_line.partition(". ")
+    return head + sep if sep else first_line
 
 
 def _make_handler(spec: ToolSpec, dispatch: Dispatch) -> Callable[..., None]:
