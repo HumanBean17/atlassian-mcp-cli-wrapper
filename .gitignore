@@ -5,3 +5,4 @@ __pycache__/
 .atli.toml
 dist/
 *.egg-info/
+.superpowers/
