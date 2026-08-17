@@ -253,6 +253,39 @@ def test_main_profiles_no_config_file(
     assert err == ""
 
 
+def test_broken_pipe_is_not_a_traceback(
+    stub_app, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`atli <tool> | head` must exit 0 quietly, not traceback on EPIPE.
+
+    Runs the real interpreter in a subprocess whose stdout is a pipe closed
+    after one line — the same condition `| head -1` creates at shutdown flush.
+    """
+    monkeypatch.delenv("ATLI_CONFIG", raising=False)
+    code = (
+        "from mcp_atlassian_cli.main import main\n"
+        f"runner = type('R', (), {{'list_tool_specs': staticmethod(lambda: []),"
+        " 'call_tool': staticmethod(lambda n, a: 'DISPATCHED')})()\n"
+        "rc = main(['tools'], runner_factory=lambda: runner)\n"
+        "sys_exit = rc\n"
+    )
+    script = tmp_path / "pipe_case.py"
+    script.write_text(code)
+    proc = subprocess.Popen(
+        [sys.executable, str(script)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=REPO_ROOT,
+    )
+    proc.stdout.readline()  # reader takes one line, then abandons the pipe
+    proc.stdout.close()
+    _stdout, stderr = proc.communicate(timeout=60)
+    assert proc.returncode == 0, stderr
+    assert "BrokenPipeError" not in stderr
+    assert "Traceback" not in stderr
+
+
 def test_no_server_import_at_module_import() -> None:
     """Importing main must never pull mcp_atlassian before the env is applied."""
     code = (

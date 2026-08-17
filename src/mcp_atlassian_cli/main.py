@@ -28,10 +28,27 @@ def main(
     ``runner_factory`` exists so tests can inject a stub server; production
     uses the default :class:`~mcp_atlassian_cli.runner.ToolRunner`, which
     imports ``mcp_atlassian`` lazily on first use.
+
+    A closed stdout (``atli <tool> | head``) is success, not a traceback: the
+    standard EPIPE idiom redirects stdout to ``os.devnull`` so the interpreter's
+    shutdown flush has nowhere to complain, and 0 is returned.
     """
     if argv is None:
         argv = sys.argv[1:]
 
+    try:
+        return _run(argv, runner_factory)
+    except BrokenPipeError:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        return 0
+
+
+def _run(
+    argv: list[str],
+    runner_factory: Callable[[], "ToolRunner"] | None,
+) -> int:
+    """Profile resolution, app build, and dispatch (see :func:`main`)."""
     try:
         profile_flag, rest_argv = config.extract_profile_flag(argv)
         config_path = config.find_config_file()

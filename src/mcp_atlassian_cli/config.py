@@ -121,7 +121,7 @@ def load_config(path: Path | None) -> AtliConfig:
         if not isinstance(values, dict):
             raise ConfigError(
                 f"Invalid config file '{path}': profile '{name}' must be a "
-                "[profiles.{name}] table."
+                f"[profiles.{name}] table."
             )
         profiles[name] = {
             key: _coerce_value(path, name, key, value) for key, value in values.items()
@@ -169,7 +169,7 @@ def resolve_profile_name(
             )
         raise ConfigError(
             f"Profile '{name}' is not defined, and no profiles are configured. "
-            "Add a [profiles.{name}] table to your config file."
+            f"Add a [profiles.{name}] table to your config file."
         )
     return name
 

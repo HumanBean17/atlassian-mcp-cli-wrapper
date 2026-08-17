@@ -31,7 +31,7 @@ $ pipx install mcp-atlassian-cli
 ```
 
 Requires Python 3.11+. The package pins `mcp-atlassian>=0.23,<0.24` (which
-brings fastmcp 3.4.x) and `cyclopts>=4.22,<5`.
+resolves to fastmcp 3.4.x today) and `cyclopts>=4.22,<5`.
 
 ## Authentication
 
@@ -44,13 +44,16 @@ none with neither.
 |---|---|---|
 | **Cloud** (basic auth) | `JIRA_URL` + `JIRA_USERNAME` + `JIRA_API_TOKEN` | `CONFLUENCE_URL` + `CONFLUENCE_USERNAME` + `CONFLUENCE_API_TOKEN` |
 | **Data Center / Server** (PAT) | `JIRA_URL` + `JIRA_PERSONAL_TOKEN` | `CONFLUENCE_URL` + `CONFLUENCE_PERSONAL_TOKEN` |
-| **Data Center / Server** (mTLS) | `JIRA_CLIENT_CERT` (+ `JIRA_CLIENT_KEY`, optional `JIRA_CLIENT_KEY_PASSWORD`) | `CONFLUENCE_CLIENT_CERT` (+ `CONFLUENCE_CLIENT_KEY`, optional `CONFLUENCE_CLIENT_KEY_PASSWORD`) |
+| **Data Center / Server** (mTLS) | `JIRA_URL` + `JIRA_CLIENT_CERT` (+ `JIRA_CLIENT_KEY`) | `CONFLUENCE_URL` + `CONFLUENCE_CLIENT_CERT` (+ `CONFLUENCE_CLIENT_KEY`) |
 
 Notes:
 
 - On Cloud, username is the Atlassian account email; the API token comes from
   <https://id.atlassian.com/manage-profile/security/api-tokens>.
 - On Data Center/Server, the personal token is created under *Profile → Personal Access Tokens*.
+- mTLS with an **encrypted** private key is not supported (the underlying
+  library rejects it). Decrypt the key first:
+  `openssl rsa -in key.enc -out key`.
 - Data Center/Server also accepts username + API token via the same
   `*_USERNAME`/`*_API_TOKEN` variables if basic auth is enabled.
 - `*URL` may include `/wiki` for Confluence. The URL decides Cloud vs Data Center: hosts ending in `.atlassian.net` (also `.jira.com`, `.jira-dev.com`, `.atlassian.com`, and exact-match `api.atlassian.com`, plus the US-Gov domains) mean Cloud; everything else, including `localhost` and private IPs, means Data Center/Server.
@@ -71,10 +74,12 @@ Storing credentials in a TOML file lets you switch instances with
 2. `./.atli.toml` in the current directory
 3. `~/.config/atli/config.toml`
 
-The first existing file wins. Any key you set in a profile (including
-`MCP_ATLASSIAN_*` options such as `TOOLSETS = "all"`) replaces the ambient
+The first existing file wins. Any key you set in a profile (including options
+such as `TOOLSETS = "all"`, which is unprefixed) replaces the ambient
 environment for that service prefix; prefixes the profile doesn't mention are
-left untouched.
+left untouched. `TOOLSETS` only takes effect in a profile that also sets at
+least one service-prefixed key (`JIRA_*`/`CONFLUENCE_*`/`MCP_ATLASSIAN_*`) —
+a `TOOLSETS`-only profile changes nothing.
 
 ```toml
 # ~/.config/atli/config.toml
@@ -125,7 +130,8 @@ $ atli --profile dc jira get-issue --issue-key OPS-42
 
 - `atli <service> <tool> --help` shows every parameter with its type and
   default, straight from the tool's schema.
-- Repeatable list flags repeat: `--labels a --labels b` gives `["a", "b"]`;
-  `--labels a,b` gives one element `"a,b"`.
-- Startup takes ~5 s per invocation; the mcp-atlassian import dominates. For
-  bulk work, prefer one `search` over many single-item calls.
+- Repeatable list flags repeat: `--read-users alice --read-users bob` (on
+  `confluence set-page-restrictions`) gives `["alice", "bob"]`;
+  `--read-users alice,bob` gives one element `"alice,bob"`.
+- Startup takes ~1 s warm, a few seconds cold (the mcp-atlassian import
+  dominates). For bulk work, prefer one `search` over many single-item calls.
