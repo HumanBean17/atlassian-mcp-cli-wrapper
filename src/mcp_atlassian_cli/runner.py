@@ -59,17 +59,26 @@ def _block_fields(block: Any) -> dict[str, Any]:
     return {key: value for key, value in vars(block).items() if value is not None}
 
 
-def _silence_fastmcp_logging() -> None:
-    """Keep fastmcp's server-side logger off the CLI's stderr.
+def _silence_server_logging() -> None:
+    """Keep the server libraries' log records off the CLI's stderr.
 
     fastmcp logs a rich traceback to stderr for every tool failure — the same
-    failure the CLI already reports through :class:`ToolCallFailure`. Letting
-    both through would corrupt the CLI's stderr contract (one clean error line).
+    failure the CLI already reports through :class:`ToolCallFailure`. And
+    ``mcp_atlassian``'s ``setup_logging`` (run at import time) installs a
+    WARNING-level ``StreamHandler`` on the ROOT logger, so its deprecation
+    warnings and error tracebacks propagate straight to the CLI's stderr. The
+    CLI itself logs nothing, so letting either through would corrupt its stderr
+    contract (one clean error line per failure).
 
-    The ``NullHandler`` matters as much as the clearing: with no handler found,
-    ``logging`` falls back to its ``lastResort`` stderr handler and the record
-    (traceback included) leaks out anyway.
+    The ``NullHandler`` on each silenced logger matters as much as the clearing:
+    with no handler found, ``logging`` falls back to its ``lastResort`` stderr
+    handler and the record (traceback included) leaks out anyway.
     """
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(logging.NullHandler())
+    root.setLevel(logging.CRITICAL)
+
     logger = logging.getLogger("fastmcp")
     logger.handlers.clear()
     logger.addHandler(logging.NullHandler())
@@ -95,11 +104,18 @@ class ToolRunner:
         return self._app_instance
 
     def _client(self) -> Any:
-        """An unopened in-memory client for ``self._app``."""
+        """An unopened in-memory client for ``self._app``.
+
+        The silencing must come AFTER ``self._app`` resolves: the first
+        resolution imports ``mcp_atlassian``, whose ``setup_logging`` installs a
+        fresh WARNING StreamHandler on the root logger — silencing before the
+        import would just be undone by it.
+        """
         from fastmcp import Client
 
-        _silence_fastmcp_logging()
-        return Client(self._app)
+        app = self._app
+        _silence_server_logging()
+        return Client(app)
 
     def list_tool_specs(self) -> list[ToolSpec]:
         """List the app's tools as parsed specs (one ``asyncio.run``)."""
@@ -124,9 +140,9 @@ class ToolRunner:
                 result = await client.call_tool(name, arguments)
             return result_to_text(result)
 
-        from fastmcp.exceptions import ToolError
-
         try:
+            from fastmcp.exceptions import ToolError  # noqa: F401  (except clause)
+
             return asyncio.run(run())
         except ToolRunnerError:
             raise
