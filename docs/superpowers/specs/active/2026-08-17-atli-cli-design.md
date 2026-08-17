@@ -85,6 +85,9 @@ CONFLUENCE_PERSONAL_TOKEN = "..."
 
 - Profile vars are injected into the process environment **before any `mcp_atlassian` module is imported** (the package reads env at import time). Import order is a hard constraint on `main.py`.
 - **Per-service replacement, not merge**: if a profile defines any `JIRA_*` var, all ambient `JIRA_*` vars are cleared first (likewise `CONFLUENCE_*`, `MCP_ATLASSIAN_*`), then the profile's values apply. A Confluence-only profile can therefore never leak ambient Corp Jira credentials to the partner instance. A profile is the source of truth for every service it touches; services it doesn't touch fall back to ambient env.
+- **Cross-cutting credential keys**: when a profile takes over any service, ambient `ATLASSIAN_OAUTH_*` and `ATLASSIAN_EXTERNAL_AUTH_ENABLE` keys are also cleared (unless the profile defines them) — the library prefers OAuth over profile basic credentials, so surviving ambient OAuth tokens would be sent to a profile-chosen host. The key list mirrors the library's env reads as of 0.23.0.
+- An empty `--profile` value (either `--profile=` or `--profile ""`) is a usage error, never a silent fall-through to `ATLI_PROFILE`/default.
+- The CLI registers no `--version` flag anywhere: cyclopts' default version flag shadows the real `version` parameter of `confluence_get_page_history`, so all apps are built with version flags disabled.
 - Tokens are plaintext in the config file — same trust level as `.env`. Docs must advise `chmod 600`. Env-var interpolation for secrets is a possible v2 addition.
 
 ## Runtime behavior
@@ -100,7 +103,7 @@ CONFLUENCE_PERSONAL_TOKEN = "..."
 |---|---|---|
 | Tool error (API failure, not found, permissions) | Server's error text → stderr | 1 |
 | Missing auth/env config | Server's config error → stderr | 1 |
-| Unknown profile, bad args, unknown tool | Usage error → stderr, hint to run `atli tools` | 2 |
+| Unknown profile, bad args, unknown tool | Usage error → stderr, with the command list from cyclopts (serves the same discovery purpose as a "run `atli tools`" hint) | 2 |
 | fastmcp in-memory API incompatible | Clear message: pin deps or update CLI; blast radius = `runner.py` | 1 |
 
 ## Testing
