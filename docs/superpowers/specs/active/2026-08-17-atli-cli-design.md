@@ -1,6 +1,6 @@
 # atli — CLI wrapper over mcp-atlassian
 
-**Status:** in_progress
+**Status:** implemented
 
 ## Problem
 
