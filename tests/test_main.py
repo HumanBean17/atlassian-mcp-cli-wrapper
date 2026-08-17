@@ -31,6 +31,16 @@ CORP_URL = "https://corp.atlassian.net"
 CORP_TOKEN = "corp-secret"
 
 _SERVICE_ENV_PREFIXES = ("JIRA_", "CONFLUENCE_", "MCP_ATLASSIAN_")
+_CROSS_SERVICE_KEYS = (
+    "ATLASSIAN_OAUTH_ENABLE",
+    "ATLASSIAN_OAUTH_CLIENT_ID",
+    "ATLASSIAN_OAUTH_CLIENT_SECRET",
+    "ATLASSIAN_OAUTH_REDIRECT_URI",
+    "ATLASSIAN_OAUTH_SCOPE",
+    "ATLASSIAN_OAUTH_CLOUD_ID",
+    "ATLASSIAN_OAUTH_ACCESS_TOKEN",
+    "ATLASSIAN_EXTERNAL_AUTH_ENABLE",
+)
 
 
 def stub_factory(app: Any) -> Callable[[], ToolRunner]:
@@ -43,7 +53,8 @@ def hermetic_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep config discovery and profile env mutation inside the test.
 
     ``apply_profile`` mutates ``os.environ`` in-process and nothing undoes that,
-    so service-prefixed variables are snapshotted and restored after each test.
+    so service-prefixed variables (and the cross-service ``ATLASSIAN_*``
+    credential keys it clears) are snapshotted and restored after each test.
     HOME is pointed at an empty tmp_path so a developer's real
     ``~/.config/atli/config.toml`` can never leak into a test.
     """
@@ -53,11 +64,13 @@ def hermetic_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     before = {
         key: value
         for key, value in os.environ.items()
-        if key.startswith(_SERVICE_ENV_PREFIXES)
+        if key.startswith(_SERVICE_ENV_PREFIXES) or key in _CROSS_SERVICE_KEYS
     }
     yield
     for key in list(os.environ):
-        if key.startswith(_SERVICE_ENV_PREFIXES) and key not in before:
+        if (
+            key.startswith(_SERVICE_ENV_PREFIXES) or key in _CROSS_SERVICE_KEYS
+        ) and key not in before:
             del os.environ[key]
     os.environ.update(before)
 

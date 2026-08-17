@@ -149,6 +149,53 @@ def test_apply_profile_replaces_per_service():
     assert environ["PATH"] == "/usr/bin"
 
 
+def test_apply_profile_clears_ambient_cross_service_credentials():
+    """Ambient ATLASSIAN_OAUTH_* / ATLASSIAN_EXTERNAL_AUTH_ENABLE are read by
+    the library for BOTH services and take precedence over username/api-token,
+    so a profile-chosen host must never receive an ambient OAuth token."""
+    environ = {
+        "ATLASSIAN_OAUTH_ACCESS_TOKEN": "ambient-oauth-token",
+        "ATLASSIAN_OAUTH_CLIENT_ID": "ambient-client-id",
+        "ATLASSIAN_OAUTH_CLIENT_SECRET": "ambient-secret",
+        "ATLASSIAN_OAUTH_REDIRECT_URI": "http://localhost:8080/callback",
+        "ATLASSIAN_OAUTH_SCOPE": "WRITE",
+        "ATLASSIAN_OAUTH_CLOUD_ID": "ambient-cloud-id",
+        "ATLASSIAN_OAUTH_ENABLE": "true",
+        "ATLASSIAN_EXTERNAL_AUTH_ENABLE": "true",
+        "PATH": "/usr/bin",
+    }
+
+    apply_profile({"JIRA_URL": "https://corp.atlassian.net"}, environ)
+
+    assert environ == {"JIRA_URL": "https://corp.atlassian.net", "PATH": "/usr/bin"}
+
+
+def test_apply_profile_keeps_profile_defined_oauth():
+    """A profile that itself selects OAuth keeps its own token."""
+    environ = {"ATLASSIAN_OAUTH_ACCESS_TOKEN": "ambient-oauth-token"}
+
+    apply_profile(
+        {
+            "JIRA_URL": "https://corp.atlassian.net",
+            "ATLASSIAN_OAUTH_ACCESS_TOKEN": "corp-oauth-token",
+        },
+        environ,
+    )
+
+    assert environ["ATLASSIAN_OAUTH_ACCESS_TOKEN"] == "corp-oauth-token"
+
+
+def test_apply_profile_without_service_prefix_leaves_ambient_oauth():
+    """A profile touching no service prefix is inert (a TOOLSETS-only profile
+    is a no-op — see the README note): ambient OAuth must stay untouched."""
+    environ = {"ATLASSIAN_OAUTH_ACCESS_TOKEN": "ambient-oauth-token", "TOOLSETS": "all"}
+
+    apply_profile({"TOOLSETS": "jira"}, environ)
+
+    assert environ["ATLASSIAN_OAUTH_ACCESS_TOKEN"] == "ambient-oauth-token"
+    assert environ["TOOLSETS"] == "all"
+
+
 def test_extract_flag_both_forms():
     assert extract_profile_flag(["--profile", "corp", "jira", "get-issue"]) == (
         "corp",

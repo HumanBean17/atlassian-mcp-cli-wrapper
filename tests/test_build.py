@@ -313,3 +313,42 @@ def test_service_app_has_no_version_flag(capsys: pytest.CaptureFixture[str]) -> 
         app(["jira", "--version"], exit_on_error=False, print_error=False)
     assert spy.calls == []
     capsys.readouterr()
+
+
+def test_repeated_list_flag_binds_list(capsys: pytest.CaptureFixture[str]) -> None:
+    """Repeatable list flags: ``--flag a --flag b`` -> ``["a", "b"]`` (a comma
+    inside one flag stays one element). Real param: ``read_users`` on
+    ``confluence set-page-restrictions``."""
+    page_id = ToolParam(name="page_id", type=str, required=True, default=None)
+    read_users = ToolParam(name="read_users", type=list, required=False, default=None)
+    spec = ToolSpec(
+        tool_name="confluence_set_page_restrictions",
+        service="confluence",
+        command_name="set-page-restrictions",
+        description="Set page restrictions.",
+        params=(page_id, read_users),
+    )
+    spy = DispatchSpy()
+    app = create_app([spec], spy)
+
+    invoke(app, ["confluence", "set-page-restrictions", "--page-id", "9"])
+    assert spy.calls[-1] == ("confluence_set_page_restrictions", {"page_id": "9"})
+
+    invoke(
+        app,
+        [
+            "confluence",
+            "set-page-restrictions",
+            "--page-id",
+            "9",
+            "--read-users",
+            "alice",
+            "--read-users",
+            "bob",
+        ],
+    )
+    assert spy.calls[-1] == (
+        "confluence_set_page_restrictions",
+        {"page_id": "9", "read_users": ["alice", "bob"]},
+    )
+    capsys.readouterr()

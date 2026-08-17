@@ -24,6 +24,27 @@ any variable with a prefix, every ambient variable with that prefix is dropped
 first, so stale credentials from another instance cannot leak through.
 """
 
+CROSS_SERVICE_CREDENTIAL_KEYS: tuple[str, ...] = (
+    "ATLASSIAN_OAUTH_ENABLE",
+    "ATLASSIAN_OAUTH_CLIENT_ID",
+    "ATLASSIAN_OAUTH_CLIENT_SECRET",
+    "ATLASSIAN_OAUTH_REDIRECT_URI",
+    "ATLASSIAN_OAUTH_SCOPE",
+    "ATLASSIAN_OAUTH_CLOUD_ID",
+    "ATLASSIAN_OAUTH_ACCESS_TOKEN",
+    "ATLASSIAN_EXTERNAL_AUTH_ENABLE",
+)
+"""Credential keys the library reads across BOTH services (no JIRA_/
+CONFLUENCE_ prefix), preferring them over username/api-token.
+
+Mirrors mcp_atlassian's env reads as of 0.23.0: ``utils/oauth.py`` reads the
+seven ``ATLASSIAN_OAUTH_*`` names (``OAuthConfig.from_env`` and
+``BYOAccessTokenOAuthConfig.from_env``), and ``utils/environment.py`` plus
+``jira/config.py`` / ``confluence/config.py`` read
+``ATLASSIAN_EXTERNAL_AUTH_ENABLE``. An ambient value here would be sent to a
+profile-chosen host, so :func:`apply_profile` clears them too.
+"""
+
 _PROFILE_USAGE = "Use --profile=NAME or --profile NAME (before the subcommand)."
 
 
@@ -156,12 +177,21 @@ def apply_profile(
     For each prefix in :data:`SERVICE_ENV_PREFIXES` the profile touches, every
     existing variable with that prefix is deleted before the profile's values
     are written. Prefixes the profile does not touch keep their ambient values.
+
+    When the profile touches ANY service prefix, the cross-service credential
+    keys in :data:`CROSS_SERVICE_CREDENTIAL_KEYS` are also deleted — unless the
+    profile defines them itself — so an ambient OAuth token can never be sent
+    to the profile-chosen host. A profile that sets no service-prefixed key at
+    all writes nothing (a TOOLSETS-only profile is a no-op).
     """
     for prefix in SERVICE_ENV_PREFIXES:
         if not any(key.startswith(prefix) for key in profile):
             continue
         for key in [existing for existing in environ if existing.startswith(prefix)]:
             del environ[key]
+        for key in CROSS_SERVICE_CREDENTIAL_KEYS:
+            if key not in profile:
+                environ.pop(key, None)
         environ.update(profile)
 
 
