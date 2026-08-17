@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=65.5"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-atlassian-cli"
+version = "0.1.0"
+description = "atli - a CLI for Jira and Confluence, powered by mcp-atlassian"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp-atlassian>=0.23,<0.24",
+    "cyclopts>=4.22,<5",
+]
+
+[project.scripts]
+atli = "mcp_atlassian_cli.main:cli"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
