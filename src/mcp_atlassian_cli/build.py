@@ -26,6 +26,12 @@ Run `atli tools` to list available tools, or `atli <service> <tool> --help`
 for a tool's parameters and defaults.
 """
 
+# cyclopts defaults every App to version_flags=['--version'], which would
+# swallow the REAL `version` param of e.g. `confluence get-page-history`
+# (print the app version, exit 0, never dispatch). The spec's command surface
+# never promised `--version`, so every App is built with it disabled.
+_NO_VERSION_FLAGS: dict[str, list[str]] = {"version_flags": []}
+
 
 def _first_sentence(description: str) -> str:
     """Return the first line of the description, up to its first ``". "``.
@@ -138,7 +144,7 @@ def create_app(
     the later spec wins silently (cyclopts would otherwise reject the
     duplicate registration).
     """
-    app = cyclopts.App(name="atli", help=_ROOT_HELP)
+    app = cyclopts.App(name="atli", help=_ROOT_HELP, **_NO_VERSION_FLAGS)
     app.command(_make_tools_command(specs))
     app.command(_make_profiles_command(profiles_text))
 
@@ -153,7 +159,7 @@ def create_app(
             app.command(handler, name=spec.command_name)
             continue
         service_app = service_apps.setdefault(
-            spec.service, cyclopts.App(name=spec.service)
+            spec.service, cyclopts.App(name=spec.service, **_NO_VERSION_FLAGS)
         )
         service_app.command(handler, name=spec.command_name)
     for service_app in service_apps.values():

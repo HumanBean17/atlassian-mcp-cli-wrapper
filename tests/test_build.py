@@ -6,7 +6,11 @@ from typing import Any
 
 import pytest
 from cyclopts import App
-from cyclopts.exceptions import MissingArgumentError, UnknownOptionError
+from cyclopts.exceptions import (
+    CycloptsError,
+    MissingArgumentError,
+    UnknownOptionError,
+)
 
 from mcp_atlassian_cli.build import create_app
 from mcp_atlassian_cli.discovery import ToolParam, ToolSpec
@@ -260,3 +264,52 @@ def test_root_help_documents_globals(capsys: pytest.CaptureFixture[str]) -> None
     assert "--profile" in out
     assert "atli tools" in out
     assert "atli <service> <tool> --help" in out
+
+
+def test_version_flag_is_a_tool_param_not_an_app_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    """``--version`` must reach the tool: cyclopts' default ``version_flags``
+    would swallow it, print the app version, and exit 0 without dispatching —
+    shadowing the real ``version`` param of ``confluence_get_page_history``."""
+    page_id = ToolParam(name="page_id", type=str, required=True, default=None)
+    version = ToolParam(name="version", type=int, required=False, default=None)
+    spec = ToolSpec(
+        tool_name="confluence_get_page_history",
+        service="confluence",
+        command_name="get-page-history",
+        description="Get the history of a page.",
+        params=(page_id, version),
+    )
+    spy = DispatchSpy()
+    app = create_app([spec], spy)
+
+    invoke(app, ["confluence", "get-page-history", "--page-id", "123", "--version", "2"])
+
+    assert spy.calls == [
+        ("confluence_get_page_history", {"page_id": "123", "version": 2})
+    ]
+    out = capsys.readouterr().out
+    assert "DISPATCHED" in out
+
+
+def test_root_has_no_version_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    """The spec's command surface never promised ``atli --version``: with
+    ``version_flags=[]`` it must be a usage error (CycloptsError), not the
+    cyclopts version banner with exit 0."""
+    from cyclopts.exceptions import CycloptsError
+
+    app = create_app([jira_get_issue_spec()], DispatchSpy())
+
+    with pytest.raises(CycloptsError):
+        app(["--version"], exit_on_error=False, print_error=False)
+    capsys.readouterr()
+
+
+def test_service_app_has_no_version_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    """Service sub-apps are constructed like the root: no ``--version`` either."""
+    spy = DispatchSpy()
+    app = create_app([jira_get_issue_spec()], spy)
+
+    with pytest.raises(CycloptsError):
+        app(["jira", "--version"], exit_on_error=False, print_error=False)
+    assert spy.calls == []
+    capsys.readouterr()
