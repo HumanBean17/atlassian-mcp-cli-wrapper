@@ -371,7 +371,10 @@ PRIME_BOTH_ENV = {**PRIME_JIRA_ENV, **PRIME_CONFLUENCE_ENV}
 
 @pytest.fixture
 def prime_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
-    """Hermetic cwd/HOME for prime tests (override lookup touches both)."""
+    """Hermetic cwd/HOME for prime tests (override lookup touches both).
+
+    Returns ``(cwd, home)`` so tests can place candidate PRIME.md files.
+    """
     monkeypatch.delenv("ATLI_PRIME", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     (tmp_path / "home").mkdir()

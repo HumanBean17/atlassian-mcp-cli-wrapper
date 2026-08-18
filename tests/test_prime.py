@@ -85,6 +85,7 @@ def override_dirs(
 
 
 def write(path: Path, content: str) -> Path:
+    """Create parent dirs, write ``content``, return the path."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
     return path

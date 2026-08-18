@@ -55,6 +55,8 @@ def read_override(environ: Mapping[str, str]) -> str | None:
     override that prints nothing.
     """
     explicit = environ.get("ATLI_PRIME")
+    # An empty ATLI_PRIME counts as unset — same falsy check ATLI_CONFIG gets
+    # in config.find_config_file, so shell plumbing can pass "" harmlessly.
     if explicit:
         path = Path(explicit)
         if not path.is_file():
