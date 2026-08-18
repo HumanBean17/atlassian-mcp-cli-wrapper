@@ -31,8 +31,12 @@ and profile env-replacement semantics are unchanged.
 
 ## Non-goals
 
-- Enum/`anyOf`/object-typed parameter rendering — the current tool surface has
-  none (verified against mcp-atlassian 0.23.x); revisit if it grows them.
+- Enum/object-typed parameter rendering — the current tool surface has no enum
+  or object params. It does carry `anyOf` params (104 of 322 on mcp-atlassian
+  0.23.x), all `Optional[primitive]`; they degrade through the existing `str`
+  type-map fallback exactly as before this change (which is also why the four
+  `array|null` params don't get repeat-flag behavior — pre-existing, out of
+  scope).
 - Accepting `--profile` anywhere in argv. Architecturally blocked: the profile
   must be applied before `mcp_atlassian` is imported, while tool parameter
   names are known only after discovery — the flag-vs-parameter ambiguity
@@ -52,40 +56,52 @@ and profile env-replacement semantics are unchanged.
   inside the `Annotated` first slot, preserving the pydantic default-validation
   behavior documented in `build.py`.
 - Description text passes through **full and verbatim** — the output contract's
-  verbatim principle extended to schema text. No sentence-truncation: tool
-  descriptions keep their current split (first sentence in `atli tools`, full
-  text at `<tool> --help`), parameter descriptions appear only at `--help`.
+  verbatim principle extended to schema text, at content level: cyclopts/rich
+  wrap long lines and may restyle list bullets while preserving the text. No
+  sentence-truncation: tool descriptions keep their current split (first
+  sentence in `atli tools`, full text at `<tool> --help`), parameter
+  descriptions appear only at `--help`.
 - cyclopts renders the help text in its existing Parameters box, wrapped,
-  alongside the `[required]`/`[default: …]` markers (verified against
-  cyclopts 4.22).
+  alongside the `[required]`/`[default: …]` markers (verified against cyclopts
+  4.22 and 4.23, the resolved versions under the `>=4.22,<5` pin).
 
 ### Self-correcting `--profile` error
 
-- In `main.py`'s existing `CycloptsError` handler: when the error message
-  names `--profile`, append the placement hint ("Use --profile=NAME or
-  --profile NAME (before the subcommand)."). The hint string currently lives
-  as `config._PROFILE_USAGE` and is promoted to a public name for the second
-  call site.
-- The enrichment fires only on cyclopts' post-parse unknown-option verdict, so
-  a flag *value* that merely contains the substring `--profile` (e.g. inside a
-  JQL string) can never false-positive: cyclopts has already decided the token
-  is an option, not a value.
+- In `main.py`'s existing `CycloptsError` handler: when the error is an
+  `UnknownOptionError` whose token keyword is exactly `--profile` (the form
+  cyclopts reports for both `--profile NAME` and `--profile=NAME` after the
+  subcommand), append the placement hint ("Use --profile=NAME or --profile
+  NAME (before the subcommand)."). The hint string lives as
+  `config.PROFILE_USAGE` (promoted from private for the second call site).
+- The trigger is the error class plus token identity, never a message
+  substring: other `CycloptsError` subclasses embed raw user values (a
+  coercion failure on `--comment-limit "5 --profile=x"`, an unused stray
+  token), and a substring match would wrongly append the placement hint to
+  those — steering an agent toward flag placement when its real problem is a
+  bad value.
 - Exit code stays 2; a correctly placed `--profile` is unaffected.
 
 ## Error handling
 
-No new error classes, exit codes, or streams. One existing message gains an
-addendum; every other behavior — stdout verbatim output, silenced server
-logging, exit codes 0/1/2 — is byte-identical.
+No new error classes, exit codes, or streams. Exactly one message — the
+unknown-option-for-`--profile` error — gains an addendum; every other
+behavior — stdout verbatim output, silenced server logging, exit codes
+0/1/2, all other error messages — is byte-identical.
 
 ## Testing
 
-- **Unit**: `parse_tool` extracts a present description; `None` when the
-  schema omits it; existing mapping tests stay valid via the defaulted field.
+- **Unit** (build level, `create_app` directly — the stub FastMCP tools carry
+  no per-param descriptions, so the build layer is the right seam): `<tool>
+  --help` output contains the parameter description text, with
+  `[required]`/`[default: …]` markers surviving; an explicitly-passed value
+  binds through the `Annotated` metadata; `parse_tool` extracts a present
+  description, passes `""` through, degrades a non-string to `None`, and
+  yields `None` when the schema omits the key.
 - **Integration** (stub FastMCP app through the `runner_factory` seam):
-  `<tool> --help` output contains the parameter description text;
   `--profile` after the subcommand exits 2 with "before the subcommand" on
-  stderr; the correctly-placed flag path is unchanged.
+  stderr; usage errors not involving `--profile`, and values/stray tokens that
+  merely *contain* the substring, get no hint; the correctly-placed flag path
+  is unchanged.
 - **Manual smoke**: `atli jira get-user-profile --help` against a real
   instance shows the schema description.
 
@@ -96,8 +112,9 @@ from the tool's schema. AGENTS.md already documents flag placement — no change
 
 ## Open Questions
 
-None — both fixes verified feasible against cyclopts 4.22 and the pinned
-mcp-atlassian surface.
+None — both fixes verified feasible against cyclopts 4.22 and 4.23 (the
+versions resolved under the `>=4.22,<5` pin) and the pinned mcp-atlassian
+surface.
 
 ## TLDR
 
