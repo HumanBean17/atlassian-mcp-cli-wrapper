@@ -19,6 +19,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
       - name: Install
-        run: uv pip install --system -e . pytest
+        run: |
+          uv venv
+          uv pip install -e . pytest
       - name: Test
-        run: python -m pytest
+        run: .venv/bin/python -m pytest

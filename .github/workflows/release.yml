@@ -31,21 +31,23 @@ jobs:
           python-version: "3.11"
           enable-cache: true
       - name: Install
-        run: uv pip install --system -e . pytest build twine
+        run: |
+          uv venv
+          uv pip install -e . pytest build twine
       - name: Version guard — tag must match __version__
         run: |
           TAG="${GITHUB_REF_NAME#v}"
-          V="$(python -c 'from mcp_atlassian_cli import __version__; print(__version__)')"
+          V="$(.venv/bin/python -c 'from mcp_atlassian_cli import __version__; print(__version__)')"
           if [ "$TAG" != "$V" ]; then
             echo "::error::tag v$TAG ≠ __version__ $V — fix the tag or bump src/mcp_atlassian_cli/__init__.py" >&2
             exit 1
           fi
       - name: Test
-        run: python -m pytest
+        run: .venv/bin/python -m pytest
       - name: Build sdist and wheel
-        run: python -m build
+        run: .venv/bin/python -m build
       - name: Check dist metadata
-        run: twine check dist/*
+        run: .venv/bin/twine check dist/*
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
