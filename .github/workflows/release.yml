@@ -1,0 +1,56 @@
+# Release: publish to PyPI on tag push.
+#
+# One-time setup (before the first release):
+#   1. pypi.org → Publishing settings → "Add a pending publisher":
+#      project "mcp-atlassian-cli", owner "HumanBean17",
+#      repository "atlassian-mcp-cli-wrapper", workflow "release.yml",
+#      environment "pypi".
+#   2. GitHub → Settings → Environments → create "pypi".
+#
+# Cutting a release: bump __version__ in src/mcp_atlassian_cli/__init__.py,
+# merge to main, then `git tag vX.Y.Z && git push origin vX.Y.Z`.
+# The version guard below fails the run if the tag and __version__ disagree.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # OIDC token for PyPI trusted publishing
+      contents: write # create the GitHub Release
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - name: Install
+        run: uv pip install --system -e . pytest build twine
+      - name: Version guard — tag must match __version__
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          V="$(python -c 'from mcp_atlassian_cli import __version__; print(__version__)')"
+          if [ "$TAG" != "$V" ]; then
+            echo "::error::tag v$TAG ≠ __version__ $V — fix the tag or bump src/mcp_atlassian_cli/__init__.py" >&2
+            exit 1
+          fi
+      - name: Test
+        run: python -m pytest
+      - name: Build sdist and wheel
+        run: python -m build
+      - name: Check dist metadata
+        run: twine check dist/*
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          attestations: true
+      - name: Create GitHub Release with artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag dist/*

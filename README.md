@@ -15,19 +15,17 @@ atli --profile work jira search --jql "assignee = currentUser()"
 
 ## Install
 
-From a checkout (the package is not on PyPI):
+```console
+$ pipx install mcp-atlassian-cli
+```
+
+Or from a checkout:
 
 ```console
 $ git clone <this-repo> && cd mcp-atlassian-cli
 $ python -m venv .venv
 $ .venv/bin/pip install -e .
 $ .venv/bin/atli tools
-```
-
-Once published on PyPI, an isolated install will also work:
-
-```console
-$ pipx install mcp-atlassian-cli
 ```
 
 Requires Python 3.11+. The package pins `mcp-atlassian>=0.23,<0.24` (which
