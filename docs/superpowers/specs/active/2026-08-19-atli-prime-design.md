@@ -1,6 +1,6 @@
 # `atli prime` — SessionStart priming for AI agents
 
-**Status:** in_progress
+**Status:** implemented
 
 ## Problem
 
