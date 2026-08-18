@@ -9,12 +9,13 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import cyclopts
+from cyclopts import Parameter
 
 from mcp_atlassian_cli import prime
-from mcp_atlassian_cli.discovery import ToolSpec
+from mcp_atlassian_cli.discovery import ToolParam, ToolSpec
 
 Dispatch = Callable[[str, dict[str, Any]], str]
 
@@ -51,6 +52,23 @@ def _first_sentence(description: str) -> str:
     return head + sep if sep else first_line
 
 
+def _param_annotation(param: ToolParam) -> Any:
+    """The signature annotation for one param: base type, maybe with help text.
+
+    The base is ``T | None`` for optional params with a ``None`` default —
+    cyclopts validates defaults with pydantic whenever pydantic is in
+    ``sys.modules`` (always true here, fastmcp imports it), and
+    ``TypeAdapter(str).validate_python(None)`` raises ValidationError — turning
+    every tool invocation into a usage error (exit 2). A schema description
+    rides along as ``Annotated[base, Parameter(help=...)]``; the base stays the
+    FIRST ``Annotated`` slot because that is the slot pydantic validates.
+    """
+    base = param.type if param.required or param.default is not None else param.type | None
+    if not param.description:
+        return base
+    return Annotated[base, Parameter(help=param.description)]
+
+
 def _make_handler(spec: ToolSpec, dispatch: Dispatch) -> Callable[..., None]:
     """Build a command function whose signature mirrors ``spec.params``.
 
@@ -75,14 +93,7 @@ def _make_handler(spec: ToolSpec, dispatch: Dispatch) -> Callable[..., None]:
         inspect.Parameter(
             name=param.name,
             kind=inspect.Parameter.KEYWORD_ONLY,
-            # Optional params with a None default must be annotated ``T | None``:
-            # cyclopts validates defaults with pydantic whenever pydantic is in
-            # sys.modules (always true here, fastmcp imports it), and
-            # ``TypeAdapter(str).validate_python(None)`` raises ValidationError —
-            # turning every tool invocation into a usage error (exit 2).
-            annotation=param.type
-            if param.required or param.default is not None
-            else param.type | None,
+            annotation=_param_annotation(param),
             default=param.default if not param.required else inspect.Parameter.empty,
         )
         for param in spec.params
