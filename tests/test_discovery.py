@@ -34,7 +34,10 @@ def test_parse_tool_full():
         inputSchema={
             "type": "object",
             "properties": {
-                "issue_key": {"type": "string"},
+                "issue_key": {
+                    "type": "string",
+                    "description": "The issue key, e.g. PROJ-123.",
+                },
                 "compact": {"type": "boolean", "default": False},
                 "comment_limit": {"type": "integer", "default": 10},
                 "labels": {"type": "array"},
@@ -59,6 +62,12 @@ def test_parse_tool_full():
     assert [p.type for p in spec.params] == [str, bool, int, list]
     assert [p.required for p in spec.params] == [True, False, False, False]
     assert [p.default for p in spec.params] == [None, False, 10, None]
+    assert [p.description for p in spec.params] == [
+        "The issue key, e.g. PROJ-123.",
+        None,
+        None,
+        None,
+    ]
 
 
 def test_parse_tool_no_description():

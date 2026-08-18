@@ -25,6 +25,7 @@ class ToolParam:
     type: type
     required: bool
     default: Any
+    description: str | None = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,7 @@ def parse_tool(tool: Any) -> ToolSpec:
             type=_TYPE_MAP.get(prop.get("type"), str),
             required=name in required,
             default=None if name in required else prop.get("default"),
+            description=prop.get("description"),
         )
         for name, prop in properties.items()
     )
