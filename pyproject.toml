@@ -4,8 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcp-atlassian-cli"
-version = "0.1.0"
+dynamic = ["version"]
 description = "atli - a CLI for Jira and Confluence, powered by mcp-atlassian"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "mcp-atlassian>=0.23,<0.24",
@@ -17,6 +18,12 @@ atli = "mcp_atlassian_cli.main:cli"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+
+# Single source of truth for the version is __version__ in
+# src/mcp_atlassian_cli/__init__.py; the release workflow checks the pushed
+# tag against it (release.yml, "Version guard" step).
+[tool.setuptools.dynamic]
+version = {attr = "mcp_atlassian_cli.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
