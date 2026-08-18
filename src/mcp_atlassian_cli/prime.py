@@ -7,6 +7,7 @@ library (plus :mod:`mcp_atlassian_cli.config` for its ``ConfigError``).
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -78,3 +79,91 @@ def _read_override_file(path: Path) -> str:
         return path.read_text(encoding="utf-8").rstrip()
     except (OSError, UnicodeDecodeError) as error:
         raise ConfigError(f"Could not read PRIME override '{path}': {error}") from error
+
+
+_TITLE = "# atli — Jira & Confluence CLI"
+_USAGE_PATTERN = "atli [--profile NAME] <service> <tool> [flags]"
+_JIRA_EXAMPLE = "atli jira get-issue --issue-key PROJ-1"
+_CONFLUENCE_EXAMPLE = 'atli confluence search --query "deploy"'
+_DISCOVERY = """\
+## Discovery
+atli tools [--service jira]           # one line per tool
+atli jira get-issue --help            # params, types, defaults"""
+_NOTES = """\
+## Notes
+- Tool output prints verbatim (LLM-ready markdown from mcp-atlassian).
+- Repeatable list flags repeat: `--read-users alice --read-users bob`.
+- Exit codes: 0 success, 1 tool/server failure, 2 usage/config error.
+- Startup ~1 s warm; prefer one `search` over many single-item calls."""
+
+
+def render_default(
+    environ: Mapping[str, str],
+    profile_name: str | None,
+    config_path: Path | None,
+) -> str:
+    """The default primer; empty string when no service is configured.
+
+    Empty output is the silence rule: zero token cost in SessionStart hooks
+    on machines where atli cannot act anyway.
+    """
+    jira, confluence = detect_services(environ)
+    if not (jira or confluence):
+        return ""
+    return _assemble(jira, confluence, profile_name, config_path)
+
+
+def render_export(
+    environ: Mapping[str, str],
+    profile_name: str | None,
+    config_path: Path | None,
+) -> str:
+    """The default primer for ``--export``: never silenced.
+
+    With no service configured the Configured line reads ``(none)`` and both
+    example lines appear — the customization bootstrap must always print.
+    """
+    jira, confluence = detect_services(environ)
+    return _assemble(jira, confluence, profile_name, config_path)
+
+
+def _assemble(
+    jira: bool, confluence: bool, profile_name: str | None, config_path: Path | None
+) -> str:
+    """Assemble the primer: dynamic header, then the static usage core."""
+    configured = [
+        name for name, on in (("jira", jira), ("confluence", confluence)) if on
+    ]
+    lines = [
+        _TITLE,
+        "",
+        "Configured: " + (", ".join(configured) if configured else "(none)"),
+    ]
+    if config_path is not None:
+        if profile_name is None:
+            lines.append("Profile: ambient environment")
+        else:
+            lines.append(f"Profile: {profile_name} ({_display_path(config_path)})")
+    lines += ["", "## Usage", _USAGE_PATTERN]
+    # With nothing configured (only reachable via render_export —
+    # render_default is silent), both example lines appear so the exported
+    # template is canonical.
+    show_jira = jira or not (jira or confluence)
+    show_confluence = confluence or not (jira or confluence)
+    if show_jira:
+        lines.append(_JIRA_EXAMPLE)
+    if show_confluence:
+        lines.append(_CONFLUENCE_EXAMPLE)
+    lines += ["", _DISCOVERY, "", _NOTES]
+    return "\n".join(lines) + "\n"
+
+
+def _display_path(config_path: Path) -> str:
+    """The config path as shown in the Profile line, home abbreviated to ``~``."""
+    text = str(config_path)
+    home = str(Path.home())
+    if text == home:
+        return "~"
+    if text.startswith(home + os.sep):
+        return "~" + text[len(home):]
+    return text
