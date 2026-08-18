@@ -45,7 +45,7 @@ seven ``ATLASSIAN_OAUTH_*`` names (``OAuthConfig.from_env`` and
 profile-chosen host, so :func:`apply_profile` clears them too.
 """
 
-_PROFILE_USAGE = "Use --profile=NAME or --profile NAME (before the subcommand)."
+PROFILE_USAGE = "Use --profile=NAME or --profile NAME (before the subcommand)."
 
 
 class ConfigError(Exception):
@@ -156,7 +156,7 @@ def resolve_profile_name(
     jira get-issue`` must not silently target the default profile's instance.
     """
     if flag == "":
-        raise ConfigError(f"--profile requires a profile name. {_PROFILE_USAGE}")
+        raise ConfigError(f"--profile requires a profile name. {PROFILE_USAGE}")
     name = flag or env.get("ATLI_PROFILE") or config.default_profile
     if name is None:
         return None
@@ -222,16 +222,16 @@ def extract_profile_flag(argv: list[str]) -> tuple[str | None, list[str]]:
         if token == "--profile":
             if index + 1 >= len(argv) or argv[index + 1].startswith("-"):
                 raise ConfigError(
-                    f"--profile requires a profile name. {_PROFILE_USAGE}"
+                    f"--profile requires a profile name. {PROFILE_USAGE}"
                 )
             value = argv[index + 1]
             if not value:
-                raise ConfigError(f"--profile requires a profile name. {_PROFILE_USAGE}")
+                raise ConfigError(f"--profile requires a profile name. {PROFILE_USAGE}")
             index += 2
         elif token.startswith("--profile="):
             name = token.partition("=")[2]
             if not name:
-                raise ConfigError(f"--profile requires a profile name. {_PROFILE_USAGE}")
+                raise ConfigError(f"--profile requires a profile name. {PROFILE_USAGE}")
             value = name
             index += 1
         else:

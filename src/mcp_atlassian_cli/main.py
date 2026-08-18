@@ -101,7 +101,14 @@ def _run(
         app = create_app(specs, runner.call_tool, profiles_text)
         app(rest_argv, exit_on_error=False, print_error=False)
     except CycloptsError as error:
-        print(error, file=sys.stderr)
+        message = str(error)
+        if "--profile" in message:
+            # cyclopts has already parsed argv by now, so a token it names in
+            # an unknown-option error is certainly an option, never a consumed
+            # flag value — the substring test cannot false-positive on e.g. a
+            # JQL string that mentions --profile.
+            message = f"{message} {config.PROFILE_USAGE}"
+        print(message, file=sys.stderr)
         return 2
     except (ToolCallFailure, ToolRunnerError) as error:
         print(error, file=sys.stderr)
