@@ -244,6 +244,38 @@ def test_main_unrelated_usage_error_gets_no_hint(
     assert out == ""
 
 
+def test_main_value_containing_profile_gets_no_hint(
+    stub_app, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An unused token that merely CONTAINS ``--profile`` is not a placement
+    mistake — appending the hint would steer the agent toward flag placement
+    when its real problem is a stray value."""
+    code = main(
+        ["jira", "get-issue", "--issue-key", "X", "--compact", "maybe --profile=x"],
+        runner_factory=stub_factory(stub_app),
+    )
+    out, err = capsys.readouterr()
+
+    assert code == 2
+    assert "before the subcommand" not in err
+    assert out == ""
+
+
+def test_main_stray_token_containing_profile_gets_no_hint(
+    stub_app, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Same guard for a stray positional carrying the substring."""
+    code = main(
+        ["jira", "get-issue", "--issue-key", "X", "stray --profile=y"],
+        runner_factory=stub_factory(stub_app),
+    )
+    out, err = capsys.readouterr()
+
+    assert code == 2
+    assert "before the subcommand" not in err
+    assert out == ""
+
+
 def test_main_tools_hint_when_empty(capsys: pytest.CaptureFixture[str]) -> None:
     from fastmcp import FastMCP
 
