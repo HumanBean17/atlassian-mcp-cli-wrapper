@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -12,7 +14,8 @@ from cyclopts.exceptions import (
     UnknownOptionError,
 )
 
-from mcp_atlassian_cli.build import create_app
+from mcp_atlassian_cli.build import create_app, create_prime_app
+from mcp_atlassian_cli.config import ConfigError
 from mcp_atlassian_cli.discovery import ToolParam, ToolSpec
 
 ISSUE_KEY = ToolParam(name="issue_key", type=str, required=True, default=None)
@@ -352,3 +355,110 @@ def test_repeated_list_flag_binds_list(capsys: pytest.CaptureFixture[str]) -> No
         {"page_id": "9", "read_users": ["alice", "bob"]},
     )
     capsys.readouterr()
+
+
+PRIME_JIRA_ENV = {
+    "JIRA_URL": "https://corp.atlassian.net",
+    "JIRA_USERNAME": "you@corp.com",
+    "JIRA_API_TOKEN": "secret",
+}
+PRIME_CONFLUENCE_ENV = {
+    "CONFLUENCE_URL": "https://wiki.internal",
+    "CONFLUENCE_PERSONAL_TOKEN": "pat-secret",
+}
+PRIME_BOTH_ENV = {**PRIME_JIRA_ENV, **PRIME_CONFLUENCE_ENV}
+
+
+@pytest.fixture
+def prime_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    """Hermetic cwd/HOME for prime tests (override lookup touches both)."""
+    monkeypatch.delenv("ATLI_PRIME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    (tmp_path / "cwd").mkdir()
+    monkeypatch.chdir(tmp_path / "cwd")
+    return tmp_path / "cwd", tmp_path / "home"
+
+
+def test_prime_prints_primer(
+    prime_dirs: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    app = create_prime_app(PRIME_BOTH_ENV, None, None)
+    invoke(app, ["prime"])
+    out = capsys.readouterr().out
+    assert "# atli — Jira & Confluence CLI" in out
+    assert "Configured: jira, confluence" in out
+    assert "atli jira get-issue --issue-key PROJ-1" in out
+    assert 'atli confluence search --query "deploy"' in out
+
+
+def test_prime_hook_json_wraps_primer(
+    prime_dirs: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    app = create_prime_app(PRIME_BOTH_ENV, "work", Path("/x/config.toml"))
+    invoke(app, ["prime", "--hook-json"])
+    out = capsys.readouterr().out
+    assert out.count("\n") == 1  # one JSON line plus print's newline
+    payload = json.loads(out)
+    assert "# atli — Jira & Confluence CLI" in (
+        payload["hookSpecificOutput"]["additionalContext"]
+    )
+
+
+def test_prime_silent_when_unconfigured(
+    prime_dirs: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    app = create_prime_app({}, None, None)
+    invoke(app, ["prime"])
+    assert capsys.readouterr().out == ""
+
+
+def test_prime_hook_json_empty_when_unconfigured(
+    prime_dirs: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    app = create_prime_app({}, None, None)
+    invoke(app, ["prime", "--hook-json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["hookSpecificOutput"]["additionalContext"] == ""
+
+
+def test_prime_override_beats_silence(
+    prime_dirs: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    cwd, _ = prime_dirs
+    override = cwd / ".atli" / "PRIME.md"
+    override.parent.mkdir()
+    override.write_text("TEAM PRIME OVERRIDE\n")
+    app = create_prime_app({}, None, None)
+
+    invoke(app, ["prime"])
+    assert capsys.readouterr().out.splitlines() == ["TEAM PRIME OVERRIDE"]
+
+    invoke(app, ["prime", "--hook-json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert (
+        payload["hookSpecificOutput"]["additionalContext"] == "TEAM PRIME OVERRIDE"
+    )
+
+    invoke(app, ["prime", "--export"])
+    out = capsys.readouterr().out
+    assert "Configured: (none)" in out
+    assert "TEAM PRIME OVERRIDE" not in out
+
+
+def test_prime_atli_prime_missing_raises(
+    prime_dirs: tuple[Path, Path],
+) -> None:
+    app = create_prime_app({"ATLI_PRIME": "/no/such/prime.md"}, None, None)
+    with pytest.raises(ConfigError):
+        invoke(app, ["prime"])
+
+
+def test_prime_help_documents_flags(capsys: pytest.CaptureFixture[str]) -> None:
+    app = create_prime_app({}, None, None)
+    with pytest.raises(SystemExit) as excinfo:
+        app(["prime", "--help"], exit_on_error=True)
+    assert excinfo.value.code in (None, 0)
+    out = capsys.readouterr().out
+    assert "--hook-json" in out
+    assert "--export" in out

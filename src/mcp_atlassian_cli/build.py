@@ -7,11 +7,13 @@ so this module never imports the runner or anything MCP-related.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 import cyclopts
 
+from mcp_atlassian_cli import prime
 from mcp_atlassian_cli.discovery import ToolSpec
 
 Dispatch = Callable[[str, dict[str, Any]], str]
@@ -131,6 +133,46 @@ def _make_profiles_command(profiles_text: str | None) -> Callable[..., None]:
         return None
 
     return profiles
+
+
+def create_prime_app(
+    environ: Mapping[str, str],
+    profile_name: str | None,
+    config_path: Path | None,
+) -> cyclopts.App:
+    """The standalone ``atli prime`` app for the main() fast path.
+
+    Deliberately built WITHOUT tool specs: prime must never pay the
+    mcp-atlassian import, so it cannot ride the normal create_app tree.
+    ``environ`` is the post-profile environment (captured when main built
+    this app); ``ConfigError`` from override resolution propagates to the
+    caller, which maps it to exit 2.
+    """
+
+    def prime_command(hook_json: bool = False, export: bool = False) -> None:
+        """Print an AI-agent primer for this atli setup (SessionStart-hook friendly)."""
+        if export:
+            # Bootstrap for customization: always the default, even unconfigured.
+            print(prime.render_export(environ, profile_name, config_path))
+            return
+        override = prime.read_override(environ)
+        content = (
+            override
+            if override is not None
+            else prime.render_default(environ, profile_name, config_path)
+        )
+        if hook_json:
+            print(prime.wrap_hook_json(content))
+        elif content:
+            print(content)
+
+    app = cyclopts.App(
+        name="atli",
+        help="atli prime — AI-agent primer (SessionStart hooks)",
+        **_NO_VERSION_FLAGS,
+    )
+    app.command(prime_command, name="prime")
+    return app
 
 
 def create_app(
