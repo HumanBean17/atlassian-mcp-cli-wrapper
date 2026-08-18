@@ -7,6 +7,7 @@ library (plus :mod:`mcp_atlassian_cli.config` for its ``ConfigError``).
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Mapping
 from pathlib import Path
@@ -167,3 +168,22 @@ def _display_path(config_path: Path) -> str:
     if text.startswith(home + os.sep):
         return "~" + text[len(home):]
     return text
+
+
+def wrap_hook_json(content: str) -> str:
+    """Wrap ``content`` in the SessionStart hook envelope (one JSON line).
+
+    Identical in shape to ``bd prime --hook-json``: compact separators, keys
+    in this order, non-ASCII raw. Served as-is to Claude Code, Gemini CLI,
+    and Codex.
+    """
+    return json.dumps(
+        {
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": content,
+            }
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )

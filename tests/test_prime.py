@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from mcp_atlassian_cli.prime import (
     read_override,
     render_default,
     render_export,
+    wrap_hook_json,
 )
 
 JIRA_CLOUD = {
@@ -221,3 +223,29 @@ def test_render_export_when_unconfigured() -> None:
     assert "Configured: (none)\n" in rendered
     assert "atli jira get-issue --issue-key PROJ-1" in rendered
     assert 'atli confluence search --query "deploy"' in rendered
+
+
+_TRICKY = '# atli — "quoted"\n\ttab \\ end ünïcode'
+
+
+def test_wrap_hook_json_round_trips_tricky_content() -> None:
+    envelope = wrap_hook_json(_TRICKY)
+    assert json.loads(envelope) == {
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": _TRICKY,
+        }
+    }
+
+
+def test_wrap_hook_json_is_one_compact_line() -> None:
+    envelope = wrap_hook_json(_TRICKY)
+    assert "\n" not in envelope
+    assert envelope.startswith(
+        '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":'
+    )
+
+
+def test_wrap_hook_json_empty_content() -> None:
+    envelope = wrap_hook_json("")
+    assert json.loads(envelope)["hookSpecificOutput"]["additionalContext"] == ""
