@@ -68,7 +68,12 @@ def parse_tool(tool: Any) -> ToolSpec:
             type=_TYPE_MAP.get(prop.get("type"), str),
             required=name in required,
             default=None if name in required else prop.get("default"),
-            description=prop.get("description"),
+            # JSON Schema mandates a string; a malformed future schema must
+            # degrade to "no description" here, not surface as a rendering
+            # error inside cyclopts' help path.
+            description=raw_description
+            if isinstance(raw_description := prop.get("description"), str)
+            else None,
         )
         for name, prop in properties.items()
     )

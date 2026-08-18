@@ -104,6 +104,29 @@ def test_parse_tool_unknown_type_falls_back_to_str():
     assert [p.type for p in spec.params] == [str, str]
 
 
+def test_parse_tool_description_guards():
+    """Descriptions pass through as strings; a non-string value from a
+    malformed schema becomes None instead of surfacing later as a rich
+    rendering error deep inside cyclopts' help path."""
+    tool = SimpleNamespace(
+        name="jira_get_issue",
+        description="Get issue.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "issue_key": {"type": "string", "description": "The key."},
+                "compact": {"type": "boolean", "description": ""},
+                "labels": {"type": "array", "description": {"nested": True}},
+            },
+            "required": ["issue_key"],
+        },
+    )
+
+    spec = parse_tool(tool)
+
+    assert [p.description for p in spec.params] == ["The key.", "", None]
+
+
 def test_parse_tool_empty_schema():
     tool = SimpleNamespace(
         name="confluence_ping",

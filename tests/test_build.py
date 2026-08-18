@@ -147,6 +147,14 @@ def test_dispatch_intact_with_annotated_optional_none(capsys: pytest.CaptureFixt
     assert spy.calls == [
         ("jira_get_issue", {"issue_key": "P", "comment_limit": 10})
     ]
+
+    # An explicitly-passed value must bind through the Annotated metadata too
+    # (a different cyclopts code path from default-filling).
+    invoke(app, ["jira", "get-issue", "--issue-key", "P", "--expand", "transitions"])
+    assert spy.calls[-1] == (
+        "jira_get_issue",
+        {"issue_key": "P", "expand": "transitions", "comment_limit": 10},
+    )
     capsys.readouterr()
 
 
@@ -288,8 +296,8 @@ def test_help_lists_tool(capsys: pytest.CaptureFixture[str]) -> None:
 
 def test_help_shows_param_descriptions(capsys: pytest.CaptureFixture[str]) -> None:
     """Each parameter's schema description renders next to its flag, verbatim,
-    while the [required]/[default: …] markers keep printing. Params without a
-    description render exactly as before."""
+    while the [required]/[default: …] markers keep printing — including for a
+    description-less param alongside described ones."""
     issue_key = ToolParam(
         name="issue_key",
         type=str,
