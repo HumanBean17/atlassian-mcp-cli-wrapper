@@ -168,6 +168,8 @@ file wins:
 
 - `atli <service> <tool> --help` shows every parameter with its type and
   default, straight from the tool's schema.
+- Parameter descriptions in a tool's `--help` come verbatim from the tool's
+  schema — accepted formats and semantics, straight from the source.
 - Repeatable list flags repeat: `--read-users alice --read-users bob` (on
   `confluence set-page-restrictions`) gives `["alice", "bob"]`;
   `--read-users alice,bob` gives one element `"alice,bob"`.

@@ -121,6 +121,43 @@ def test_optional_none_default_with_pydantic_loaded(capsys: pytest.CaptureFixtur
     capsys.readouterr()
 
 
+def test_dispatch_intact_with_annotated_optional_none(capsys: pytest.CaptureFixture[str]) -> None:
+    """The ``T | None`` base must survive inside ``Annotated`` wrapping.
+
+    Descriptions ride in as ``Annotated[base, Parameter(help=...)]``; the base
+    (with its ``| None`` for None-default optionals) must stay the first
+    ``Annotated`` slot, or pydantic's default validation rejects ``None``
+    again — same failure mode as the test above.
+    """
+    import pydantic  # noqa: F401  (cyclopts checks "pydantic" in sys.modules)
+
+    expand = ToolParam(
+        name="expand",
+        type=str,
+        required=False,
+        default=None,
+        description="Fields to expand in the response.",
+    )
+    comment_limit = ToolParam(name="comment_limit", type=int, required=False, default=10)
+    spy = DispatchSpy()
+    app = create_app([jira_get_issue_spec((ISSUE_KEY, expand, comment_limit))], spy)
+
+    invoke(app, ["jira", "get-issue", "--issue-key", "P"])
+
+    assert spy.calls == [
+        ("jira_get_issue", {"issue_key": "P", "comment_limit": 10})
+    ]
+
+    # An explicitly-passed value must bind through the Annotated metadata too
+    # (a different cyclopts code path from default-filling).
+    invoke(app, ["jira", "get-issue", "--issue-key", "P", "--expand", "transitions"])
+    assert spy.calls[-1] == (
+        "jira_get_issue",
+        {"issue_key": "P", "expand": "transitions", "comment_limit": 10},
+    )
+    capsys.readouterr()
+
+
 def test_missing_required_is_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
     app = create_app([jira_get_issue_spec()], DispatchSpy())
 
@@ -255,6 +292,39 @@ def test_help_lists_tool(capsys: pytest.CaptureFixture[str]) -> None:
     out = capsys.readouterr().out
     assert "Get an issue. More detail." in out
     assert "--issue-key" in out
+
+
+def test_help_shows_param_descriptions(capsys: pytest.CaptureFixture[str]) -> None:
+    """Each parameter's schema description renders next to its flag, verbatim,
+    while the [required]/[default: …] markers keep printing — including for a
+    description-less param alongside described ones."""
+    issue_key = ToolParam(
+        name="issue_key",
+        type=str,
+        required=True,
+        default=None,
+        description="The issue key, e.g. PROJ-123.",
+    )
+    compact = ToolParam(
+        name="compact",
+        type=bool,
+        required=False,
+        default=False,
+        description="Return a compact view.",
+    )
+    comment_limit = ToolParam(name="comment_limit", type=int, required=False, default=10)
+    app = create_app([jira_get_issue_spec((issue_key, compact, comment_limit))], DispatchSpy())
+
+    with pytest.raises(SystemExit) as excinfo:
+        app(["jira", "get-issue", "--help"], exit_on_error=True)
+
+    assert excinfo.value.code in (None, 0)
+    out = capsys.readouterr().out
+    assert "The issue key, e.g. PROJ-123." in out
+    assert "Return a compact view." in out
+    assert "--issue-key" in out
+    assert "[required]" in out
+    assert "[default: 10]" in out
 
 
 def test_root_help_documents_globals(capsys: pytest.CaptureFixture[str]) -> None:

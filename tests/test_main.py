@@ -210,6 +210,72 @@ def test_main_empty_profile_value_exit_2(
     assert out == ""
 
 
+def test_main_profile_after_subcommand_gets_hint(
+    stub_app, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A misplaced --profile stays a usage error, but the message teaches the
+    correct placement instead of dead-ending at cyclopts' bare unknown-option
+    text. Asserts on OUR hint, not cyclopts' wording."""
+    code = main(
+        ["jira", "get-issue", "--profile", "work", "--issue-key", "X"],
+        runner_factory=stub_factory(stub_app),
+    )
+    out, err = capsys.readouterr()
+
+    assert code == 2
+    assert "--profile" in err
+    assert "before the subcommand" in err
+    assert out == ""
+
+
+def test_main_unrelated_usage_error_gets_no_hint(
+    stub_app, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The hint is reserved for --profile mistakes, not appended to every
+    usage error."""
+    code = main(
+        ["jira", "get-issue", "--issue-key", "P", "--bogus", "1"],
+        runner_factory=stub_factory(stub_app),
+    )
+    out, err = capsys.readouterr()
+
+    assert code == 2
+    assert "before the subcommand" not in err
+    assert out == ""
+
+
+def test_main_value_containing_profile_gets_no_hint(
+    stub_app, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An unused token that merely CONTAINS ``--profile`` is not a placement
+    mistake — appending the hint would steer the agent toward flag placement
+    when its real problem is a stray value."""
+    code = main(
+        ["jira", "get-issue", "--issue-key", "X", "--compact", "maybe --profile=x"],
+        runner_factory=stub_factory(stub_app),
+    )
+    out, err = capsys.readouterr()
+
+    assert code == 2
+    assert "before the subcommand" not in err
+    assert out == ""
+
+
+def test_main_stray_token_containing_profile_gets_no_hint(
+    stub_app, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Same guard for a stray positional carrying the substring."""
+    code = main(
+        ["jira", "get-issue", "--issue-key", "X", "stray --profile=y"],
+        runner_factory=stub_factory(stub_app),
+    )
+    out, err = capsys.readouterr()
+
+    assert code == 2
+    assert "before the subcommand" not in err
+    assert out == ""
+
+
 def test_main_tools_hint_when_empty(capsys: pytest.CaptureFixture[str]) -> None:
     from fastmcp import FastMCP
 

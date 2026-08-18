@@ -13,7 +13,7 @@ import os
 import sys
 from collections.abc import Callable
 
-from cyclopts.exceptions import CycloptsError
+from cyclopts.exceptions import CycloptsError, UnknownOptionError
 
 from mcp_atlassian_cli import config
 
@@ -101,7 +101,17 @@ def _run(
         app = create_app(specs, runner.call_tool, profiles_text)
         app(rest_argv, exit_on_error=False, print_error=False)
     except CycloptsError as error:
-        print(error, file=sys.stderr)
+        message = str(error)
+        # The placement hint fires ONLY when cyclopts itself classifies the
+        # token as an unknown option whose keyword is exactly ``--profile``.
+        # Matching the message substring would over-fire: other CycloptsError
+        # subclasses embed raw user values (a coercion failure on
+        # ``--comment-limit "5 --profile=x"``, an unused stray token) that
+        # merely contain the substring — steering the agent toward flag
+        # placement when its real problem is a bad value.
+        if isinstance(error, UnknownOptionError) and error.token.keyword == "--profile":
+            message = f"{message} {config.PROFILE_USAGE}"
+        print(message, file=sys.stderr)
         return 2
     except (ToolCallFailure, ToolRunnerError) as error:
         print(error, file=sys.stderr)
