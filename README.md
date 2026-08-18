@@ -116,6 +116,46 @@ $ atli profiles            # lists profiles and URLs — never tokens
 $ atli --profile dc jira get-issue --issue-key OPS-42
 ```
 
+## Priming AI agents (`atli prime`)
+
+`atli prime` prints a compact primer of the local setup — configured services,
+active profile, usage patterns, quirks — as AI-optimized markdown. It is
+designed for SessionStart hooks, so agents re-learn atli after context
+compaction. It never imports mcp-atlassian and costs milliseconds.
+
+```console
+$ atli prime [--hook-json] [--export]
+```
+
+Claude Code hook (same envelope serves Gemini CLI and Codex):
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "atli prime --hook-json" }] }
+    ]
+  }
+}
+```
+
+- `--hook-json` wraps the output in the SessionStart hook envelope.
+- `--export` prints the default content (ignores overrides, works even when
+  nothing is configured) — the starting point for customization.
+- With nothing configured and no override file, `prime` prints nothing and
+  exits 0 — zero token cost on machines where atli cannot act anyway.
+- The Configured line reads exported variables and profiles only; `.env`
+  files (consumed inside mcp-atlassian) are invisible to prime.
+
+**Override** — a PRIME.md file replaces the default content entirely (no
+dynamic header, prints even when unconfigured). Lookup order, first existing
+file wins:
+
+1. `$ATLI_PRIME` — must point at an existing file (an error otherwise)
+2. `./.atli/PRIME.md` — current directory; check it into the repo for
+   project-specific conventions
+3. `~/.config/atli/PRIME.md` — personal default
+
 ## Exit codes
 
 | Code | Meaning |
