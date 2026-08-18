@@ -1,6 +1,6 @@
 # atli — schema-faithful parameter help & self-correcting `--profile` error
 
-**Status:** draft
+**Status:** in_progress
 
 ## Problem
 
