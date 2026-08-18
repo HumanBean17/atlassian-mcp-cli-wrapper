@@ -5,6 +5,7 @@
 - `atli jira get-issue --issue-key PROJ-1`
 - `atli confluence search --query "deploy"`
 - Multi-instance: `atli --profile NAME <command>` (flag goes before the subcommand).
+- `atli prime [--hook-json]`: compact primer of this setup (configured services, profile, usage) for SessionStart hooks; override via `.atli/PRIME.md`.
 - Startup takes ~1 s warm, a few seconds cold (mcp-atlassian import dominates); the tool's markdown/JSON is printed verbatim to stdout.
 - Repeatable list flags repeat: `--read-users alice --read-users bob` on `confluence set-page-restrictions` (a comma inside one flag makes a single element).
 - Exit codes: 0 success, 1 tool/server failure, 2 usage or config error.
