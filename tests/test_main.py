@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -299,3 +300,152 @@ def test_no_server_import_at_module_import() -> None:
         cwd=REPO_ROOT,
     )
     assert result.returncode == 0, result.stderr
+
+
+WORK_TOML = """\
+[profiles.work]
+JIRA_URL = "https://work.atlassian.net"
+JIRA_USERNAME = "you@work.com"
+JIRA_API_TOKEN = "work-secret"
+"""
+
+PRIME_JIRA_ENV = {
+    "JIRA_URL": "https://work.atlassian.net",
+    "JIRA_USERNAME": "you@work.com",
+    "JIRA_API_TOKEN": "work-secret",
+}
+PRIME_CONFLUENCE_ENV = {
+    "CONFLUENCE_URL": "https://wiki.internal",
+    "CONFLUENCE_PERSONAL_TOKEN": "pat-secret",
+}
+
+
+def forbidden_runner() -> ToolRunner:
+    """A factory whose construction means the fast path is broken."""
+    raise AssertionError("runner must not be constructed for prime")
+
+
+@pytest.fixture
+def prime_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neutral override lookup; Jira cloud + Confluence PAT configured."""
+    monkeypatch.delenv("ATLI_PRIME", raising=False)
+    for key, value in {**PRIME_JIRA_ENV, **PRIME_CONFLUENCE_ENV}.items():
+        monkeypatch.setenv(key, value)
+
+
+def test_main_prime_never_constructs_runner(
+    prime_env: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code = main(["prime"], runner_factory=forbidden_runner)
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert "# atli — Jira & Confluence CLI" in out
+    assert err == ""
+
+
+def test_main_prime_hook_json(
+    prime_env: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code = main(["prime", "--hook-json"], runner_factory=forbidden_runner)
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert err == ""
+    payload = json.loads(out)
+    assert payload["hookSpecificOutput"]["additionalContext"] != ""
+
+
+def test_main_prime_help(capsys: pytest.CaptureFixture[str]) -> None:
+    code = main(["prime", "--help"], runner_factory=forbidden_runner)
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert "--hook-json" in out
+    assert err == ""
+
+
+def test_main_prime_bad_flag_exit_2(capsys: pytest.CaptureFixture[str]) -> None:
+    code = main(["prime", "--bogus"], runner_factory=forbidden_runner)
+    out, err = capsys.readouterr()
+    assert code == 2
+    assert err != ""
+    assert out == ""
+
+
+def test_main_prime_profile_flow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / ".atli.toml").write_text(WORK_TOML)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ATLI_PRIME", raising=False)
+
+    code = main(["--profile", "work", "prime"], runner_factory=forbidden_runner)
+    out, err = capsys.readouterr()
+
+    assert code == 0
+    assert "Configured: jira" in out
+    assert "Profile: work" in out
+    assert err == ""
+
+
+def test_main_prime_silent_when_unconfigured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("ATLI_PRIME", raising=False)
+    monkeypatch.chdir(tmp_path)
+    for key in [
+        key for key in os.environ if key.startswith(("JIRA_", "CONFLUENCE_"))
+    ]:
+        monkeypatch.delenv(key, raising=False)
+
+    code = main(["prime"], runner_factory=forbidden_runner)
+    out, err = capsys.readouterr()
+
+    assert code == 0
+    assert out == ""
+    assert err == ""
+
+
+def test_main_prime_atli_prime_missing_exit_2(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("ATLI_PRIME", "/no/such/prime.md")
+
+    code = main(["prime"], runner_factory=forbidden_runner)
+    out, err = capsys.readouterr()
+
+    assert code == 2
+    assert "ATLI_PRIME" in err
+    assert out == ""
+
+
+def test_prime_never_imports_mcp_atlassian(tmp_path: Path) -> None:
+    """The fast path must run prime end-to-end without the server import.
+
+    Same shape as test_no_server_import_at_module_import, but driving a full
+    main(['prime', '--hook-json']) dispatch in a hermetic subprocess.
+    """
+    code = (
+        "import sys\n"
+        "from mcp_atlassian_cli.main import main\n"
+        "rc = main(['prime', '--hook-json'])\n"
+        "assert 'mcp_atlassian' not in sys.modules, 'prime imported the server!'\n"
+        "sys.exit(rc)\n"
+    )
+    script = tmp_path / "prime_case.py"
+    script.write_text(code)
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in ("ATLI_CONFIG", "ATLI_PROFILE", "ATLI_PRIME")
+        and not key.startswith(("JIRA_", "CONFLUENCE_", "MCP_ATLASSIAN_"))
+    }
+    env.update(PRIME_JIRA_ENV, HOME=str(tmp_path))
+    proc = subprocess.run(
+        [sys.executable, str(script)],
+        capture_output=True,
+        text=True,
+        cwd=str(tmp_path),
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "prime imported the server" not in proc.stderr
+    assert '"hookEventName":"SessionStart"' in proc.stdout

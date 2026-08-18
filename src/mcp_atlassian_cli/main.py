@@ -62,6 +62,27 @@ def _run(
         print(error, file=sys.stderr)
         return 2
 
+    # `prime` is the SessionStart-hook command: it must never pay the
+    # mcp-atlassian import, so it dispatches before the runner is ever built.
+    # Accepted edge: a hypothetical prefix-less server tool named `prime`
+    # would be shadowed (all real tools are jira_/confluence_-prefixed).
+    if rest_argv[:1] == ["prime"]:
+        from mcp_atlassian_cli.build import create_prime_app
+
+        try:
+            app = create_prime_app(os.environ, profile_name, config_data.path)
+            app(rest_argv, exit_on_error=False, print_error=False)
+        except CycloptsError as error:
+            print(error, file=sys.stderr)
+            return 2
+        except config.ConfigError as error:
+            print(error, file=sys.stderr)
+            return 2
+        except SystemExit as error:
+            code = error.code
+            return code if isinstance(code, int) else 0
+        return 0
+
     from mcp_atlassian_cli.build import create_app
     from mcp_atlassian_cli.runner import (
         ToolCallFailure,
