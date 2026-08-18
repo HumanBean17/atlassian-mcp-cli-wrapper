@@ -8,6 +8,9 @@ library (plus :mod:`mcp_atlassian_cli.config` for its ``ConfigError``).
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
+
+from mcp_atlassian_cli.config import ConfigError
 
 _SERVICE_ENV_PREFIXES: tuple[str, ...] = ("JIRA", "CONFLUENCE")
 """Service names, in display order, matched against ``<NAME>_URL`` etc."""
@@ -38,3 +41,40 @@ def _configured(environ: Mapping[str, str], service: str) -> bool:
         bool(value(f"{service}_CLIENT_CERT")),
     )
     return any(credentials)
+
+
+def read_override(environ: Mapping[str, str]) -> str | None:
+    """Return the PRIME.md override content (trailing whitespace stripped).
+
+    Lookup order, first existing file wins: ``$ATLI_PRIME`` (a set-but-missing
+    path is an error the user must fix, mirroring ``ATLI_CONFIG``), then
+    ``./.atli/PRIME.md``, then ``~/.config/atli/PRIME.md``. ``None`` means no
+    override exists; an existing-but-empty file yields ``""`` — an explicit
+    override that prints nothing.
+    """
+    explicit = environ.get("ATLI_PRIME")
+    if explicit:
+        path = Path(explicit)
+        if not path.is_file():
+            raise ConfigError(
+                f"ATLI_PRIME is set to '{explicit}', but that file does not "
+                "exist. Point ATLI_PRIME at an existing markdown file, "
+                "or unset it."
+            )
+        return _read_override_file(path)
+    candidates = (
+        Path.cwd() / ".atli" / "PRIME.md",
+        Path.home() / ".config" / "atli" / "PRIME.md",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return _read_override_file(candidate)
+    return None
+
+
+def _read_override_file(path: Path) -> str:
+    """Read one override file, surfacing failures as ConfigError."""
+    try:
+        return path.read_text(encoding="utf-8").rstrip()
+    except (OSError, UnicodeDecodeError) as error:
+        raise ConfigError(f"Could not read PRIME override '{path}': {error}") from error
