@@ -1,5 +1,6 @@
 """Tests for the atli CLI entry point."""
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -10,7 +11,9 @@ ATLI = REPO_ROOT / ".venv" / "bin" / "atli"
 
 
 def test_version_attribute():
-    assert mcp_atlassian_cli.__version__ == "0.1.0"
+    # Single source of truth is __version__; the release workflow checks it
+    # against the git tag, so here we only assert it's valid semver.
+    assert re.fullmatch(r"\d+\.\d+\.\d+", mcp_atlassian_cli.__version__)
 
 
 def test_help_subprocess():
