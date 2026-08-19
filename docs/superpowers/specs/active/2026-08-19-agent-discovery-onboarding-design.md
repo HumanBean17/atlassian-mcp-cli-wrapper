@@ -1,6 +1,6 @@
 # atli — cold-agent discovery, examples, long content, and prime installer
 
-**Status:** draft
+**Status:** in_progress
 
 ## Problem
 
