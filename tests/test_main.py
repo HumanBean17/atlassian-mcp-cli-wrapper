@@ -158,6 +158,64 @@ def test_main_missing_at_file_exit_2(capsys: pytest.CaptureFixture[str]) -> None
     assert out == ""
 
 
+class MultiServiceRunner(SpyRunner):
+    """Three specs across two services for did-you-mean testing."""
+
+    def list_tool_specs(self) -> list[ToolSpec]:
+        return [
+            ToolSpec(
+                tool_name="jira_get_issue",
+                service="jira",
+                command_name="get-issue",
+                description="Get an issue.",
+                params=(ToolParam(name="issue_key", type=str, required=True, default=None),),
+            ),
+            ToolSpec(
+                tool_name="jira_get_issue_worklog",
+                service="jira",
+                command_name="get-issue-worklog",
+                description="Get worklogs.",
+                params=(ToolParam(name="issue_key", type=str, required=True, default=None),),
+            ),
+            ToolSpec(
+                tool_name="confluence_search",
+                service="confluence",
+                command_name="search",
+                description="Search content.",
+                params=(ToolParam(name="query", type=str, required=True, default=None),),
+            ),
+        ]
+
+
+def test_main_unknown_tool_suggests_close_match(capsys: pytest.CaptureFixture[str]) -> None:
+    code = main(
+        ["jira", "get-isue", "--issue-key", "X"],
+        runner_factory=lambda: MultiServiceRunner(),
+    )
+    out, err = capsys.readouterr()
+    assert code == 2
+    assert 'Unknown command "get-isue"' in err
+    assert 'Did you mean "get-issue"?' in err
+    assert out == ""
+
+
+def test_main_unknown_service_suggests_service(capsys: pytest.CaptureFixture[str]) -> None:
+    code = main(["jra"], runner_factory=lambda: MultiServiceRunner())
+    err = capsys.readouterr().err
+    assert code == 2
+    assert 'Did you mean "jira"?' in err
+
+
+def test_main_unknown_command_without_match_gets_no_suggestion(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code = main(["jira", "zzzzzz"], runner_factory=lambda: MultiServiceRunner())
+    err = capsys.readouterr().err
+    assert code == 2
+    assert 'Unknown command "zzzzzz"' in err
+    assert "Did you mean" not in err
+
+
 def test_main_missing_required_exit_2(stub_app, capsys: pytest.CaptureFixture[str]) -> None:
     code = main(["jira", "get-issue"], runner_factory=stub_factory(stub_app))
     out, err = capsys.readouterr()
