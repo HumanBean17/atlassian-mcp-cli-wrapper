@@ -103,8 +103,8 @@ def _make_handler(spec: ToolSpec, dispatch: Dispatch) -> Callable[..., None]:
 
 
 def _make_tools_command(specs: Sequence[ToolSpec]) -> Callable[..., None]:
-    def tools(service: str | None = None) -> None:
-        """List available tools, optionally filtered by service."""
+    def tools(service: str | None = None, *, search: str | None = None) -> None:
+        """List available tools, optionally filtered by service or keyword."""
         if not specs:
             print(
                 "No services configured — set JIRA_URL / CONFLUENCE_URL "
@@ -114,8 +114,29 @@ def _make_tools_command(specs: Sequence[ToolSpec]) -> Callable[..., None]:
         listed = [
             spec for spec in specs if service is None or spec.service == service
         ]
+        if search is not None:
+            # The haystack is the FULL description, not the printed first
+            # sentence: an agent's keyword often names what a tool does in
+            # passing, deep in the docstring.
+            needle = search.lower()
+            listed = [
+                spec
+                for spec in listed
+                if needle
+                in f"{spec.service or ''} {spec.command_name} {spec.description}".lower()
+            ]
         if not listed:
-            print(f"No tools for service '{service}'.")
+            if search is not None:
+                print(
+                    f"No tools match '{search}'. "
+                    "Broaden the query, or run 'atli tools' for the full list."
+                )
+            else:
+                print(
+                    f"No tools for service '{service}'. "
+                    "Use 'atli tools' to list all, or "
+                    "'atli tools --search TEXT' to shortlist."
+                )
             return None
         rows = [
             (

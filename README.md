@@ -166,6 +166,8 @@ file wins:
 
 ## Notes for agents and scripts
 
+- `atli tools --search TEXT` shortlists tools by keyword across names and
+  full descriptions.
 - `atli <service> <tool> --help` shows every parameter with its type and
   default, straight from the tool's schema.
 - Parameter descriptions in a tool's `--help` come verbatim from the tool's

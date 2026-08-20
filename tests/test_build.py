@@ -220,7 +220,10 @@ def test_tools_command_listing(capsys: pytest.CaptureFixture[str]) -> None:
     assert "confluence" not in out
 
     invoke(app, ["tools", "--service", "nope"])
-    assert capsys.readouterr().out.splitlines() == ["No tools for service 'nope'."]
+    assert capsys.readouterr().out.splitlines() == [
+        "No tools for service 'nope'. "
+        "Use 'atli tools' to list all, or 'atli tools --search TEXT' to shortlist."
+    ]
 
     empty_app = create_app([], DispatchSpy())
     invoke(empty_app, ["tools"])
@@ -230,7 +233,61 @@ def test_tools_command_listing(capsys: pytest.CaptureFixture[str]) -> None:
     ]
 
 
-def test_tools_listing_one_line_per_tool(capsys: pytest.CaptureFixture[str]) -> None:
+def test_tools_search(capsys: pytest.CaptureFixture[str]) -> None:
+    """``--search`` shortlists by case-insensitive substring over service,
+    command name, and the FULL description (not just the printed first
+    sentence), AND-combined with ``--service``."""
+    get_issue = jira_get_issue_spec(
+        description="Get an issue.\n\nSecond paragraph mentions worklogs."
+    )
+    jira_search = ToolSpec(
+        tool_name="jira_search",
+        service="jira",
+        command_name="search",
+        description="Search issues using JQL",
+        params=(ToolParam(name="jql", type=str, required=True, default=None),),
+    )
+    confluence_search = ToolSpec(
+        tool_name="confluence_search",
+        service="confluence",
+        command_name="search",
+        description="Search Confluence content",
+        params=(ToolParam(name="query", type=str, required=True, default=None),),
+    )
+    app = create_app([get_issue, jira_search, confluence_search], DispatchSpy())
+
+    invoke(app, ["tools", "--search", "issue"])
+    out = capsys.readouterr().out
+    assert "jira get-issue" in out
+    assert "confluence search" not in out
+
+    # Full-description depth: "worklogs" appears only past the first sentence.
+    invoke(app, ["tools", "--search", "worklog"])
+    out = capsys.readouterr().out
+    assert "jira get-issue" in out
+    assert "jira search" not in out
+
+    # Case-insensitive.
+    invoke(app, ["tools", "--search", "CONFLUENCE"])
+    out = capsys.readouterr().out
+    assert "confluence search" in out
+    assert "jira get-issue" not in out
+
+    # Filters combine with AND.
+    invoke(app, ["tools", "--service", "jira", "--search", "search"])
+    out = capsys.readouterr().out
+    assert "jira search" in out
+    assert "confluence search" not in out
+    assert "jira get-issue" not in out
+
+    invoke(app, ["tools", "--search", "zzzz"])
+    assert capsys.readouterr().out.splitlines() == [
+        "No tools match 'zzzz'. "
+        "Broaden the query, or run 'atli tools' for the full list."
+    ]
+
+
+
     """66 of 98 real descriptions end their first sentence with ``.\\n\\n``, so a
     ``". "``-only split prints the whole multi-paragraph description and blank
     lines wreck the aligned table. The listing must be exactly one physical line
