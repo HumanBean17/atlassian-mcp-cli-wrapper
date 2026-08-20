@@ -20,14 +20,15 @@ from mcp_atlassian_cli.discovery import ToolParam, ToolSpec, to_kebab
 Dispatch = Callable[[str, dict[str, Any]], str]
 
 _ROOT_HELP = """\
-atli - a CLI for Jira and Confluence, powered by mcp-atlassian.
+atli — a CLI for Jira and Confluence, powered by mcp-atlassian.
 
-Global flags (parsed before tool discovery, never forwarded):
-  --profile NAME   Use a config profile instead of the ambient environment.
-
-Run `atli tools` to list available tools, or `atli <service> <tool> --help`
-for a tool's parameters and defaults.
+- `atli tools [--service NAME] [--search TEXT]` — list or shortlist tools.
+- `atli <service> <tool> --help` — parameters, types, defaults, examples.
+- `--profile NAME` — global flag, always before the subcommand.
 """
+# The bullets are load-bearing: cyclopts renders help through rich, which
+# re-flows plain multi-line prose into a justified blob; markdown list items
+# are the one construct that keeps one line per item.
 
 # cyclopts defaults every App to version_flags=['--version'], which would
 # swallow the REAL `version` param of e.g. `confluence get-page-history`
@@ -174,6 +175,16 @@ def _make_profiles_command(profiles_text: str | None) -> Callable[..., None]:
     return profiles
 
 
+def _prime_stub() -> None:
+    """Print the AI-agent primer (SessionStart hooks; see 'atli prime --install').
+
+    Display-only: the real `prime` dispatches on main()'s fast path (before
+    the mcp-atlassian import); this registration exists solely so root
+    --help lists it. Reaching it at runtime means the fast path broke.
+    """
+    raise RuntimeError("prime must dispatch via the fast path, not the help stub")
+
+
 def create_prime_app(
     environ: Mapping[str, str],
     profile_name: str | None,
@@ -228,6 +239,8 @@ def create_app(
     app = cyclopts.App(name="atli", help=_ROOT_HELP, **_NO_VERSION_FLAGS)
     app.command(_make_tools_command(specs))
     app.command(_make_profiles_command(profiles_text))
+    # Display-only (see _prime_stub): real `prime` calls never reach this app.
+    app.command(_prime_stub, name="prime")
 
     unique: dict[tuple[str | None, str], ToolSpec] = {}
     for spec in specs:
@@ -240,7 +253,16 @@ def create_app(
             app.command(handler, name=spec.command_name)
             continue
         service_app = service_apps.setdefault(
-            spec.service, cyclopts.App(name=spec.service, **_NO_VERSION_FLAGS)
+            spec.service,
+            cyclopts.App(
+                name=spec.service,
+                help=(
+                    f"{spec.service.title()} tools — run "
+                    f"`atli {spec.service} <tool> --help` for parameters "
+                    "and examples."
+                ),
+                **_NO_VERSION_FLAGS,
+            ),
         )
         service_app.command(handler, name=spec.command_name)
     for service_app in service_apps.values():

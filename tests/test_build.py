@@ -58,6 +58,16 @@ def jira_get_issue_spec(
     )
 
 
+def confluence_search_spec() -> ToolSpec:
+    return ToolSpec(
+        tool_name="confluence_search",
+        service="confluence",
+        command_name="search",
+        description="Search Confluence content.",
+        params=(ToolParam(name="query", type=str, required=True, default=None),),
+    )
+
+
 def test_dispatch_required_and_default(capsys: pytest.CaptureFixture[str]) -> None:
     spy = DispatchSpy()
     app = create_app([jira_get_issue_spec()], spy)
@@ -469,6 +479,44 @@ def test_root_help_documents_globals(capsys: pytest.CaptureFixture[str]) -> None
     assert "--profile" in out
     assert "atli tools" in out
     assert "atli <service> <tool> --help" in out
+
+
+def test_root_help_lists_services_with_descriptions(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The root Commands table shows what each service group is, not bare
+    names — a zero-context agent learns the grammar from --help alone."""
+    app = create_app([jira_get_issue_spec(), confluence_search_spec()], DispatchSpy())
+
+    with pytest.raises(SystemExit):
+        app(["--help"], exit_on_error=True)
+
+    out = capsys.readouterr().out
+    assert "Jira tools" in out
+    assert "Confluence tools" in out
+    assert "--search" in out  # discovery bullet teaches the shortlist flag
+    assert "examples" in out  # tool-help bullet mentions examples
+
+
+def test_root_help_lists_prime(capsys: pytest.CaptureFixture[str]) -> None:
+    """`prime` is dispatched on the fast path, invisible to the built app —
+    without a display-only stub it would never appear in --help."""
+    app = create_app([], DispatchSpy())
+
+    with pytest.raises(SystemExit):
+        app(["--help"], exit_on_error=True)
+
+    out = capsys.readouterr().out
+    assert "AI-agent primer" in out
+
+
+def test_prime_stub_raises_if_ever_dispatched() -> None:
+    """Defense in depth: the stub exists for --help only. main() intercepts
+    `prime` before create_app runs, so dispatch reaching the stub is a bug."""
+    app = create_app([], DispatchSpy())
+
+    with pytest.raises(RuntimeError, match="fast path"):
+        app(["prime"], exit_on_error=False, print_error=False)
 
 
 def test_version_flag_is_a_tool_param_not_an_app_flag(capsys: pytest.CaptureFixture[str]) -> None:

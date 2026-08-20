@@ -158,6 +158,17 @@ def test_main_missing_at_file_exit_2(capsys: pytest.CaptureFixture[str]) -> None
     assert out == ""
 
 
+def test_main_prime_fast_path_beats_stub(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The `prime` row in root help is a display-only stub; the real command
+    must still dispatch on the fast path, never constructing the runner."""
+
+    def forbidden() -> ToolRunner:
+        raise AssertionError("runner constructed: prime did not take the fast path")
+
+    code = main(["prime"], runner_factory=forbidden)
+    assert code == 0
+
+
 class MultiServiceRunner(SpyRunner):
     """Three specs across two services for did-you-mean testing."""
 
