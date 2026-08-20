@@ -27,7 +27,10 @@ def expand_string(value: str, flag: str) -> str:
     existing file verbatim or errors loudly; anything else passes through.
     """
     if value == "-":
-        if sys.stdin.isatty():
+        # A closed stdin (``0<&-``, cron/hook runners) leaves sys.stdin None;
+        # treat it like a TTY — literal "-" — so the no-traceback contract
+        # holds in every invocation shape.
+        if sys.stdin is None or sys.stdin.isatty():
             return value
         return sys.stdin.read()
     if value.startswith("@@"):

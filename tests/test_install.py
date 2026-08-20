@@ -84,6 +84,49 @@ def test_install_corrupt_settings_aborts_without_write(tmp_path: Path) -> None:
     assert settings_path.read_text(encoding="utf-8") == corrupt  # untouched
 
 
+def test_install_non_object_json_aborts_without_write(tmp_path: Path) -> None:
+    """Valid JSON that is not an object (a hand-mangled file) is a clean
+    ConfigError — never an AttributeError traceback."""
+    home = tmp_path / "home"
+    settings_path = home / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text("[]", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="top-level JSON must be an object"):
+        install("claude", "user", home=home, cwd=tmp_path)
+
+    assert settings_path.read_text(encoding="utf-8") == "[]"
+
+
+def test_merge_hook_skips_junk_entries_tolerantly() -> None:
+    """Non-dict entries and non-list hooks inside SessionStart are skipped,
+    not fatal — the file works for its owner, so it works for us."""
+    settings = {"hooks": {"SessionStart": ["junk", 3, {"hooks": 5}]}}
+    merged, changed = merge_hook(settings)
+    assert changed is True
+    assert merged["hooks"]["SessionStart"][-1]["hooks"][-1]["command"] == HOOK_COMMAND
+
+
+def test_install_is_atomic_no_tmp_left_behind(tmp_path: Path) -> None:
+    """The write goes through a sibling tmp + rename, so no .tmp file
+    survives a successful install."""
+    home = tmp_path / "home"
+
+    install("claude", "user", home=home, cwd=tmp_path)
+
+    claude_dir = home / ".claude"
+    assert sorted(p.name for p in claude_dir.iterdir()) == ["settings.json"]
+
+
+def test_run_install_dedupes_harness_names(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+
+    messages = run_install(["claude", "claude"], "user", home=home, cwd=tmp_path)
+
+    assert len(messages) == 1
+
+
 def test_unsupported_harness_reports_without_touching_disk(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()

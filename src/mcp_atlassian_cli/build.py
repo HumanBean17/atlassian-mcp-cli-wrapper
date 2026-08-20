@@ -136,10 +136,17 @@ def _make_tools_command(specs: Sequence[ToolSpec]) -> Callable[..., None]:
             ]
         if not listed:
             if search is not None:
-                print(
-                    f"No tools match '{search}'. "
-                    "Broaden the query, or run 'atli tools' for the full list."
-                )
+                if service is not None:
+                    print(
+                        f"No tools in service '{service}' match '{search}'. "
+                        "Broaden the query, or run 'atli tools --search TEXT' "
+                        "across all services."
+                    )
+                else:
+                    print(
+                        f"No tools match '{search}'. "
+                        "Broaden the query, or run 'atli tools' for the full list."
+                    )
             else:
                 print(
                     f"No tools for service '{service}'. "

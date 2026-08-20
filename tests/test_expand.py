@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +62,43 @@ def test_dash_reads_stdin_when_piped(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_dash_passes_through_at_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sys.stdin", FakeStdin("", tty=True))
     assert expand_string("-", "body") == "-"
+
+
+def test_dash_passes_through_when_stdin_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A closed stdin (``0<&-``) sets sys.stdin to None — that must be a
+    literal "-", never an AttributeError traceback."""
+    monkeypatch.setattr("sys.stdin", None)
+    assert expand_string("-", "body") == "-"
+
+
+def test_double_at_alone_is_a_literal_at() -> None:
+    assert expand_string("@@", "body") == "@"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
+def test_unreadable_file_is_a_config_error(tmp_path: Path) -> None:
+    locked = tmp_path / "locked.md"
+    locked.write_text("secret", encoding="utf-8")
+    locked.chmod(0o000)
+
+    with pytest.raises(ConfigError, match="could not read"):
+        expand_string(f"@{locked}", "body")
+
+
+def test_non_utf8_file_is_a_config_error(tmp_path: Path) -> None:
+    binary = tmp_path / "blob.bin"
+    binary.write_bytes(b"\xff\xfe\x00bad")
+
+    with pytest.raises(ConfigError, match="could not read"):
+        expand_string(f"@{binary}", "body")
+
+
+def test_expand_value_preserves_tuple_type(tmp_path: Path) -> None:
+    value = ("plain", 7)
+    assert expand_value(value, "read-users") == ("plain", 7)
+    assert isinstance(expand_value(value, "read-users"), tuple)
 
 
 def test_plain_strings_pass_through(tmp_path: Path) -> None:

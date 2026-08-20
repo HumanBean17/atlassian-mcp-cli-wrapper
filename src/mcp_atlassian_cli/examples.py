@@ -52,7 +52,8 @@ EXAMPLES: dict[str, tuple[str, ...]] = {
         "atli confluence create-page --space-key OPS --title 'Runbook' --content @page.md",
     ),
     "confluence_update_page": (
-        "atli confluence update-page --page-id 123456789 --content @page.md",
+        "atli confluence update-page --page-id 123456789 --title 'Runbook' "
+        "--content @page.md",
     ),
     "confluence_add_comment": (
         "atli confluence add-comment --page-id 123456789 --body @comment.md",

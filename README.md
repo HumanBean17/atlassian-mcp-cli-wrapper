@@ -138,7 +138,8 @@ $ atli prime --install --scope project  # .claude/settings.json in the repo
   output remains compatible with both if you wire them manually.
 
 Manual Claude Code hook, if you prefer (same envelope as the installer
-writes; also serves Gemini CLI and Codex):
+writes; the `--hook-json` envelope is what Gemini CLI and Codex would need
+too, wired by hand until their hook support lands):
 
 ```json
 {

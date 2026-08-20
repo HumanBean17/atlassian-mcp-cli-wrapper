@@ -296,8 +296,16 @@ def test_tools_search(capsys: pytest.CaptureFixture[str]) -> None:
         "Broaden the query, or run 'atli tools' for the full list."
     ]
 
+    # Combined filters: the message blames the right filter — the keyword
+    # matched, the service filter emptied the list.
+    invoke(app, ["tools", "--service", "jira", "--search", "confluence"])
+    assert capsys.readouterr().out.splitlines() == [
+        "No tools in service 'jira' match 'confluence'. "
+        "Broaden the query, or run 'atli tools --search TEXT' across all services."
+    ]
 
 
+def test_tools_listing_one_line_per_tool(capsys: pytest.CaptureFixture[str]) -> None:
     """66 of 98 real descriptions end their first sentence with ``.\\n\\n``, so a
     ``". "``-only split prints the whole multi-paragraph description and blank
     lines wreck the aligned table. The listing must be exactly one physical line

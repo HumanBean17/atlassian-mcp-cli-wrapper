@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -12,8 +13,8 @@ from mcp_atlassian_cli.examples import EXAMPLES, render_examples
 _FLAG_RE = re.compile(r"^--[a-z][a-z0-9-]*$")
 
 
-def _server_source(service: str) -> str:
-    """The installed mcp-atlassian server module defining ``<service>_*`` tools."""
+def _server_tree(service: str) -> ast.Module:
+    """The parsed mcp-atlassian server module defining ``<service>_*`` tools."""
     path = (
         Path(__file__).resolve().parents[1]
         / ".venv" / "lib" / "python3.11" / "site-packages"
@@ -21,7 +22,37 @@ def _server_source(service: str) -> str:
     )
     if not path.is_file():
         pytest.fail(f"mcp-atlassian server source not found at {path}")
-    return path.read_text(encoding="utf-8")
+    return ast.parse(path.read_text(encoding="utf-8"))
+
+
+def _tool_signature(service: str, function_name: str) -> tuple[set[str], set[str]]:
+    """``(all_params, required_params)`` for one server tool, from its AST.
+
+    Required = a parameter with no default (positional defaults align to the
+    tail; keyword-only defaults sit in kw_defaults). ``ctx`` is the FastMCP
+    context, never a CLI flag.
+    """
+    for node in ast.walk(_server_tree(service)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function_name:
+            args = node.args
+            positional = args.args
+            defaults = [None] * (len(positional) - len(args.defaults)) + list(args.defaults)
+            params = {a.arg for a in positional + args.kwonlyargs} - {"ctx"}
+            required = {a.arg for a, d in zip(positional, defaults) if d is None and a.arg != "ctx"}
+            required |= {
+                a.arg for a, d in zip(args.kwonlyargs, args.kw_defaults) if d is None
+            }
+            return params, required
+    pytest.fail(f"no function '{function_name}' in mcp_atlassian.servers.{service}")
+
+
+def _flags(line: str) -> set[str]:
+    """The snake_case param names behind every ``--kebab`` flag in a line."""
+    return {
+        token[2:].replace("-", "_")
+        for token in line.split()
+        if token.startswith("--")
+    }
 
 
 def test_render_examples_known_tool() -> None:
@@ -60,34 +91,27 @@ def test_corpus_examples_are_well_formed() -> None:
                     assert _FLAG_RE.match(token), (tool_name, token)
 
 
-def test_corpus_tools_exist_in_mcp_atlassian() -> None:
-    """Each corpus key maps to a real server tool: the snake_case function
-    name (service prefix stripped) must appear in the installed server
-    source. If this fails after a version bump, fix the corpus, not the test."""
-    sources = {}
-    for tool_name in EXAMPLES:
-        service, _, rest = tool_name.partition("_")
-        if service not in sources:
-            sources[service] = _server_source(service)
-        function_name = f"def {rest}("
-        assert function_name in sources[service], (
-            f"{tool_name}: no function '{rest}' in mcp_atlassian.servers.{service}"
-        )
-
-
 def test_corpus_flags_exist_on_their_tool() -> None:
-    """Every flag an example mentions is a parameter of the real tool (the
-    function's signature in the server source must contain the snake_case
-    name). Guards the corpus against plausible-but-wrong flag names."""
+    """Every flag an example mentions is a real parameter of that tool —
+    checked against the parsed signature, not a text window (a body local
+    must never satisfy this check)."""
     for tool_name, lines in EXAMPLES.items():
         service, _, rest = tool_name.partition("_")
-        source = _server_source(service)
-        start = source.index(f"def {rest}(")
-        signature = source[start : source.index("):", start) + 1]
+        params, _required = _tool_signature(service, rest)
         for line in lines:
-            for token in line.split():
-                if token.startswith("--"):
-                    param = token[2:].replace("-", "_")
-                    assert re.search(
-                        rf"\b{param}\b", signature
-                    ), f"{tool_name}: --{token[2:]} is not a parameter of '{rest}'"
+            unknown = _flags(line) - params
+            assert not unknown, f"{tool_name}: no such params {sorted(unknown)}"
+
+
+def test_corpus_examples_satisfy_required_params() -> None:
+    """Every example is runnable verbatim: each required param of the tool
+    appears as a flag in EVERY example line. (update-page's --title once
+    shipped missing — exactly this class of bug.)"""
+    for tool_name, lines in EXAMPLES.items():
+        service, _, rest = tool_name.partition("_")
+        _params, required = _tool_signature(service, rest)
+        for line in lines:
+            missing = required - _flags(line)
+            assert not missing, (
+                f"{tool_name}: example '{line}' omits required {sorted(missing)}"
+            )

@@ -16,6 +16,7 @@ data change, not new code.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -81,8 +82,10 @@ def merge_hook(settings: dict) -> tuple[dict, bool]:
     when it is already present (idempotent by construction).
 
     Only the hook entry is appended: every other key, list, and ordering
-    survives untouched. A malformed ``hooks`` shape raises rather than
-    guessing how to repair someone's hand-written settings.
+    survives untouched. A malformed ``hooks``/``SessionStart`` shape raises
+    rather than guessing how to repair someone's hand-written settings;
+    junk INSIDE the SessionStart list (non-dict entries, non-list ``hooks``)
+    is skipped tolerantly — the file works for its owner, so it works for us.
     """
     hooks = settings.get("hooks")
     if hooks is None:
@@ -97,7 +100,10 @@ def merge_hook(settings: dict) -> tuple[dict, bool]:
     for entry in session:
         if not isinstance(entry, dict):
             continue
-        for hook in entry.get("hooks", ()):
+        entry_hooks = entry.get("hooks", ())
+        if not isinstance(entry_hooks, (list, tuple)):
+            continue
+        for hook in entry_hooks:
             if isinstance(hook, dict) and hook.get("command") == HOOK_COMMAND:
                 return settings, False
     merged = dict(settings)
@@ -134,11 +140,24 @@ def install(name: str, scope: str, *, home: Path, cwd: Path) -> str:
                 f"{path}: not valid JSON ({error}). Fix or remove the file, "
                 "then re-run."
             ) from error
+        if not isinstance(settings, dict):
+            raise ConfigError(
+                f"{path}: top-level JSON must be an object, got "
+                f"{type(settings).__name__}. Fix or remove the file, then "
+                "re-run."
+            )
     merged, changed = merge_hook(settings)
     if not changed:
         return f"already installed: {path}"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(merged, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    # Atomic swap: write the sibling temp file, then rename over the target —
+    # a crash mid-write can never truncate the user's settings (the very
+    # corruption the read path refuses to tolerate).
+    tmp_path = path.with_name(path.name + ".tmp")
+    tmp_path.write_text(
+        json.dumps(merged, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    os.replace(tmp_path, path)
     return f"installed: {path} (SessionStart += {HOOK_COMMAND})"
 
 
@@ -167,5 +186,5 @@ def run_install(
         if unknown:
             valid = ", ".join(sorted(HARNESSES))
             raise ConfigError(f"Unknown harness: {', '.join(unknown)}. Valid: {valid}.")
-        selected = names
+        selected = list(dict.fromkeys(names))  # dedupe, keep order
     return [install(name, scope, home=home, cwd=cwd) for name in selected]
