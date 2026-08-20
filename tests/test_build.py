@@ -426,6 +426,39 @@ def test_help_has_no_examples_for_uncurated_tool(capsys: pytest.CaptureFixture[s
     assert "Example invocations:" not in capsys.readouterr().out
 
 
+def test_dispatch_expands_at_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A string value ``@path`` reads the file before dispatch — the tool sees
+    the file's contents, never the ``@`` reference."""
+    comment = tmp_path / "comment.md"
+    comment.write_text("body from file\n", encoding="utf-8")
+    body = ToolParam(name="body", type=str, required=False, default=None)
+    spy = DispatchSpy()
+    app = create_app([jira_get_issue_spec((ISSUE_KEY, COMPACT, body))], spy)
+
+    invoke(app, ["jira", "get-issue", "--issue-key", "P", "--body", f"@{comment}"])
+
+    assert spy.calls[-1] == (
+        "jira_get_issue",
+        {"issue_key": "P", "compact": False, "body": "body from file\n"},
+    )
+    capsys.readouterr()
+
+
+def test_dispatch_missing_at_file_raises_config_error(tmp_path: Path) -> None:
+    body = ToolParam(name="body", type=str, required=False, default=None)
+    app = create_app([jira_get_issue_spec((ISSUE_KEY, COMPACT, body))], DispatchSpy())
+
+    with pytest.raises(ConfigError) as excinfo:
+        app(
+            ["jira", "get-issue", "--issue-key", "P", "--body", "@/no/such/file"],
+            exit_on_error=False,
+            print_error=False,
+        )
+    assert "file not found" in str(excinfo.value)
+
+
 def test_root_help_documents_globals(capsys: pytest.CaptureFixture[str]) -> None:
     app = create_app([], DispatchSpy())
 

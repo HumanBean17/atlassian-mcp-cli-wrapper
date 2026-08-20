@@ -178,5 +178,8 @@ file wins:
 - Repeatable list flags repeat: `--read-users alice --read-users bob` (on
   `confluence set-page-restrictions`) gives `["alice", "bob"]`;
   `--read-users alice,bob` gives one element `"alice,bob"`.
+- String values expand: `--body @comment.md` reads the file, `-` reads
+  stdin (when piped), `@@text` passes a literal `@text`. A missing file is
+  a usage error (exit 2) whose message shows the escape.
 - Startup takes ~1 s warm, a few seconds cold (the mcp-atlassian import
   dominates). For bulk work, prefer one `search` over many single-item calls.

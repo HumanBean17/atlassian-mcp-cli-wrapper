@@ -143,6 +143,21 @@ def test_main_usage_error_exit_2(stub_app, capsys: pytest.CaptureFixture[str]) -
     assert out == ""
 
 
+def test_main_missing_at_file_exit_2(capsys: pytest.CaptureFixture[str]) -> None:
+    """A ``@path`` value pointing at a missing file is a usage error (exit 2)
+    whose message teaches the ``@@`` escape — never a traceback."""
+    spy = SpyRunner()
+    code = main(
+        ["jira", "get-issue", "--issue-key", "@/no/such/file"],
+        runner_factory=lambda: spy,
+    )
+    out, err = capsys.readouterr()
+    assert code == 2
+    assert "file not found" in err
+    assert "@@" in err
+    assert out == ""
+
+
 def test_main_missing_required_exit_2(stub_app, capsys: pytest.CaptureFixture[str]) -> None:
     code = main(["jira", "get-issue"], runner_factory=stub_factory(stub_app))
     out, err = capsys.readouterr()

@@ -14,8 +14,8 @@ from typing import Annotated, Any
 import cyclopts
 from cyclopts import Parameter
 
-from mcp_atlassian_cli import examples, prime
-from mcp_atlassian_cli.discovery import ToolParam, ToolSpec
+from mcp_atlassian_cli import examples, expand, prime
+from mcp_atlassian_cli.discovery import ToolParam, ToolSpec, to_kebab
 
 Dispatch = Callable[[str, dict[str, Any]], str]
 
@@ -86,6 +86,10 @@ def _make_handler(spec: ToolSpec, dispatch: Dispatch) -> Callable[..., None]:
             if value is None and not param.required:
                 value = param.default
             if value is not None:
+                # Applies to the final value (user-passed or schema default):
+                # the pinned mcp-atlassian surface has no '@'/'-'-only string
+                # defaults, so uniform expansion is safe and simple.
+                value = expand.expand_value(value, to_kebab(param.name))
                 arguments[param.name] = value
         print(dispatch(spec.tool_name, arguments))
 
