@@ -426,7 +426,7 @@ def test_help_has_no_examples_for_uncurated_tool(capsys: pytest.CaptureFixture[s
     assert "Example invocations:" not in capsys.readouterr().out
 
 
-
+def test_root_help_documents_globals(capsys: pytest.CaptureFixture[str]) -> None:
     app = create_app([], DispatchSpy())
 
     with pytest.raises(SystemExit):
