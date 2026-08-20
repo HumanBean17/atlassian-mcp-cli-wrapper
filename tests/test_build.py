@@ -384,7 +384,49 @@ def test_help_shows_param_descriptions(capsys: pytest.CaptureFixture[str]) -> No
     assert "[default: 10]" in out
 
 
-def test_root_help_documents_globals(capsys: pytest.CaptureFixture[str]) -> None:
+def test_help_shows_examples_for_corpus_tool(capsys: pytest.CaptureFixture[str]) -> None:
+    """A curated tool's ``--help`` renders the Examples block below the
+    parameter table — the example and the params coexist."""
+    jira_search = ToolSpec(
+        tool_name="jira_search",
+        service="jira",
+        command_name="search",
+        description="Search issues using JQL",
+        params=(
+            ToolParam(name="jql", type=str, required=True, default=None),
+            ToolParam(name="fields", type=str, required=False, default=None),
+            ToolParam(name="limit", type=int, required=False, default=50),
+        ),
+    )
+    app = create_app([jira_search], DispatchSpy())
+
+    with pytest.raises(SystemExit) as excinfo:
+        app(["jira", "search", "--help"], exit_on_error=True)
+
+    assert excinfo.value.code in (None, 0)
+    out = capsys.readouterr().out
+    assert "Example invocations:" in out
+    assert "assignee = currentUser()" in out
+    assert "--jql" in out  # params table and examples coexist
+
+
+def test_help_has_no_examples_for_uncurated_tool(capsys: pytest.CaptureFixture[str]) -> None:
+    get_worklog = ToolSpec(
+        tool_name="jira_get_issue_worklog",
+        service="jira",
+        command_name="get-issue-worklog",
+        description="Get worklog entries for an issue",
+        params=(ISSUE_KEY,),
+    )
+    app = create_app([get_worklog], DispatchSpy())
+
+    with pytest.raises(SystemExit):
+        app(["jira", "get-issue-worklog", "--help"], exit_on_error=True)
+
+    assert "Example invocations:" not in capsys.readouterr().out
+
+
+
     app = create_app([], DispatchSpy())
 
     with pytest.raises(SystemExit):

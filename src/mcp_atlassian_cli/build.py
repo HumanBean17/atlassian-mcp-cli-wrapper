@@ -14,7 +14,7 @@ from typing import Annotated, Any
 import cyclopts
 from cyclopts import Parameter
 
-from mcp_atlassian_cli import prime
+from mcp_atlassian_cli import examples, prime
 from mcp_atlassian_cli.discovery import ToolParam, ToolSpec
 
 Dispatch = Callable[[str, dict[str, Any]], str]
@@ -99,6 +99,9 @@ def _make_handler(spec: ToolSpec, dispatch: Dispatch) -> Callable[..., None]:
         for param in spec.params
     )
     handler.__doc__ = spec.description
+    example_block = examples.render_examples(spec.tool_name)
+    if example_block is not None:
+        handler.__doc__ = f"{spec.description}\n\n{example_block}"
     return handler
 
 
