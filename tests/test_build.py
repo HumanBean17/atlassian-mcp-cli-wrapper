@@ -707,6 +707,36 @@ def test_prime_atli_prime_missing_raises(
         invoke(app, ["prime"])
 
 
+def test_prime_install_claude(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`prime --install` writes the SessionStart hook through the prime app —
+    on the fast path, with HOME pointed at a tmp dir."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    app = create_prime_app({}, None, None)
+
+    invoke(app, ["prime", "--install", "--harness", "claude"])
+
+    out = capsys.readouterr().out
+    assert out.startswith("installed:")
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert settings["hooks"]["SessionStart"][0]["hooks"][0]["command"] == (
+        "atli prime --hook-json"
+    )
+
+
+def test_prime_install_rejects_bad_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    app = create_prime_app({}, None, None)
+
+    with pytest.raises(ConfigError, match="scope"):
+        app(
+            ["prime", "--install", "--scope", "bogus"],
+            exit_on_error=False,
+            print_error=False,
+        )
+
+
 def test_prime_help_documents_flags(capsys: pytest.CaptureFixture[str]) -> None:
     app = create_prime_app({}, None, None)
     with pytest.raises(SystemExit) as excinfo:

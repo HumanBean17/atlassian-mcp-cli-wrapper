@@ -14,7 +14,8 @@ from typing import Annotated, Any
 import cyclopts
 from cyclopts import Parameter
 
-from mcp_atlassian_cli import examples, expand, prime
+from mcp_atlassian_cli import examples, expand, install as install_mod, prime
+from mcp_atlassian_cli.config import ConfigError
 from mcp_atlassian_cli.discovery import ToolParam, ToolSpec, to_kebab
 
 Dispatch = Callable[[str, dict[str, Any]], str]
@@ -199,8 +200,27 @@ def create_prime_app(
     caller, which maps it to exit 2.
     """
 
-    def prime_command(hook_json: bool = False, export: bool = False) -> None:
-        """Print an AI-agent primer for this atli setup (SessionStart-hook friendly)."""
+    def prime_command(
+        hook_json: bool = False,
+        export: bool = False,
+        install: bool = False,
+        scope: str = "user",
+        harness: list[str] | None = None,
+    ) -> None:
+        """Print an AI-agent primer for this atli setup (SessionStart-hook friendly).
+
+        ``--install`` onboards this machine instead: it merges the prime hook
+        into harness settings (idempotent, never clobbering) and prints one
+        report line per harness.
+        """
+        if install:
+            if scope not in ("user", "project"):
+                raise ConfigError("--scope must be 'user' or 'project'")
+            for line in install_mod.run_install(
+                harness, scope, home=Path.home(), cwd=Path.cwd()
+            ):
+                print(line)
+            return
         if export:
             # Bootstrap for customization: always the default, even unconfigured.
             print(prime.render_export(environ, profile_name, config_path))

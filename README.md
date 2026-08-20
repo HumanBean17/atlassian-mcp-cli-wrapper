@@ -123,6 +123,33 @@ active profile, usage patterns, quirks — as AI-optimized markdown. It is
 designed for SessionStart hooks, so agents re-learn atli after context
 compaction. It never imports mcp-atlassian and costs milliseconds.
 
+The one-command onboarding installs the hook for you — idempotent, never
+clobbering existing settings:
+
+```console
+$ atli prime --install               # detect harnesses, user scope
+$ atli prime --install --scope project  # .claude/settings.json in the repo
+```
+
+- **Claude Code** is supported (user or project scope).
+- **Gemini CLI** and **Codex** are detected but not auto-installed: Gemini
+  runs SessionStart hooks without injecting their context (gemini-cli
+  issue #15413); Codex hooks are experimental. `atli prime --hook-json`
+  output remains compatible with both if you wire them manually.
+
+Manual Claude Code hook, if you prefer (same envelope as the installer
+writes; also serves Gemini CLI and Codex):
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "atli prime --hook-json" }] }
+    ]
+  }
+}
+```
+
 ```console
 $ atli prime [--hook-json] [--export]
 ```
