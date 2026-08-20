@@ -113,6 +113,12 @@ def _run(
             message = f"{message} {config.PROFILE_USAGE}"
         print(message, file=sys.stderr)
         return 2
+    except config.ConfigError as error:
+        # A ConfigError raised inside a generated handler (e.g. a missing
+        # @file) propagates through cyclopts uncaught; map it to the same
+        # exit-2 usage-error contract as every other user-fixable problem.
+        print(error, file=sys.stderr)
+        return 2
     except (ToolCallFailure, ToolRunnerError) as error:
         print(error, file=sys.stderr)
         return 1

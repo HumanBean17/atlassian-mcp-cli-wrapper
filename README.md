@@ -123,6 +123,34 @@ active profile, usage patterns, quirks — as AI-optimized markdown. It is
 designed for SessionStart hooks, so agents re-learn atli after context
 compaction. It never imports mcp-atlassian and costs milliseconds.
 
+The one-command onboarding installs the hook for you — idempotent, never
+clobbering existing settings:
+
+```console
+$ atli prime --install               # detect harnesses, user scope
+$ atli prime --install --scope project  # .claude/settings.json in the repo
+```
+
+- **Claude Code** is supported (user or project scope).
+- **Gemini CLI** and **Codex** are detected but not auto-installed: Gemini
+  runs SessionStart hooks without injecting their context (gemini-cli
+  issue #15413); Codex hooks are experimental. `atli prime --hook-json`
+  output remains compatible with both if you wire them manually.
+
+Manual Claude Code hook, if you prefer (same envelope as the installer
+writes; the `--hook-json` envelope is what Gemini CLI and Codex would need
+too, wired by hand until their hook support lands):
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "atli prime --hook-json" }] }
+    ]
+  }
+}
+```
+
 ```console
 $ atli prime [--hook-json] [--export]
 ```
@@ -166,12 +194,20 @@ file wins:
 
 ## Notes for agents and scripts
 
+- `atli tools --search TEXT` shortlists tools by keyword across names and
+  full descriptions.
 - `atli <service> <tool> --help` shows every parameter with its type and
   default, straight from the tool's schema.
 - Parameter descriptions in a tool's `--help` come verbatim from the tool's
   schema — accepted formats and semantics, straight from the source.
+- Popular tools show real invocations under `Example invocations:` in
+  `--help` — identifiers like `--page-id`, JQL and relative-date formats,
+  `@file` for long content.
 - Repeatable list flags repeat: `--read-users alice --read-users bob` (on
   `confluence set-page-restrictions`) gives `["alice", "bob"]`;
   `--read-users alice,bob` gives one element `"alice,bob"`.
+- String values expand: `--body @comment.md` reads the file, `-` reads
+  stdin (when piped), `@@text` passes a literal `@text`. A missing file is
+  a usage error (exit 2) whose message shows the escape.
 - Startup takes ~1 s warm, a few seconds cold (the mcp-atlassian import
   dominates). For bulk work, prefer one `search` over many single-item calls.

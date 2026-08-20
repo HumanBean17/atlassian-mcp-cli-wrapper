@@ -58,6 +58,16 @@ def jira_get_issue_spec(
     )
 
 
+def confluence_search_spec() -> ToolSpec:
+    return ToolSpec(
+        tool_name="confluence_search",
+        service="confluence",
+        command_name="search",
+        description="Search Confluence content.",
+        params=(ToolParam(name="query", type=str, required=True, default=None),),
+    )
+
+
 def test_dispatch_required_and_default(capsys: pytest.CaptureFixture[str]) -> None:
     spy = DispatchSpy()
     app = create_app([jira_get_issue_spec()], spy)
@@ -220,13 +230,78 @@ def test_tools_command_listing(capsys: pytest.CaptureFixture[str]) -> None:
     assert "confluence" not in out
 
     invoke(app, ["tools", "--service", "nope"])
-    assert capsys.readouterr().out.splitlines() == ["No tools for service 'nope'."]
+    assert capsys.readouterr().out.splitlines() == [
+        "No tools for service 'nope'. "
+        "Use 'atli tools' to list all, or 'atli tools --search TEXT' to shortlist."
+    ]
 
     empty_app = create_app([], DispatchSpy())
     invoke(empty_app, ["tools"])
     assert capsys.readouterr().out.splitlines() == [
         "No services configured — set JIRA_URL / CONFLUENCE_URL "
         "or a profile (see atli --help)."
+    ]
+
+
+def test_tools_search(capsys: pytest.CaptureFixture[str]) -> None:
+    """``--search`` shortlists by case-insensitive substring over service,
+    command name, and the FULL description (not just the printed first
+    sentence), AND-combined with ``--service``."""
+    get_issue = jira_get_issue_spec(
+        description="Get an issue.\n\nSecond paragraph mentions worklogs."
+    )
+    jira_search = ToolSpec(
+        tool_name="jira_search",
+        service="jira",
+        command_name="search",
+        description="Search issues using JQL",
+        params=(ToolParam(name="jql", type=str, required=True, default=None),),
+    )
+    confluence_search = ToolSpec(
+        tool_name="confluence_search",
+        service="confluence",
+        command_name="search",
+        description="Search Confluence content",
+        params=(ToolParam(name="query", type=str, required=True, default=None),),
+    )
+    app = create_app([get_issue, jira_search, confluence_search], DispatchSpy())
+
+    invoke(app, ["tools", "--search", "issue"])
+    out = capsys.readouterr().out
+    assert "jira get-issue" in out
+    assert "confluence search" not in out
+
+    # Full-description depth: "worklogs" appears only past the first sentence.
+    invoke(app, ["tools", "--search", "worklog"])
+    out = capsys.readouterr().out
+    assert "jira get-issue" in out
+    assert "jira search" not in out
+
+    # Case-insensitive.
+    invoke(app, ["tools", "--search", "CONFLUENCE"])
+    out = capsys.readouterr().out
+    assert "confluence search" in out
+    assert "jira get-issue" not in out
+
+    # Filters combine with AND.
+    invoke(app, ["tools", "--service", "jira", "--search", "search"])
+    out = capsys.readouterr().out
+    assert "jira search" in out
+    assert "confluence search" not in out
+    assert "jira get-issue" not in out
+
+    invoke(app, ["tools", "--search", "zzzz"])
+    assert capsys.readouterr().out.splitlines() == [
+        "No tools match 'zzzz'. "
+        "Broaden the query, or run 'atli tools' for the full list."
+    ]
+
+    # Combined filters: the message blames the right filter — the keyword
+    # matched, the service filter emptied the list.
+    invoke(app, ["tools", "--service", "jira", "--search", "confluence"])
+    assert capsys.readouterr().out.splitlines() == [
+        "No tools in service 'jira' match 'confluence'. "
+        "Broaden the query, or run 'atli tools --search TEXT' across all services."
     ]
 
 
@@ -327,6 +402,81 @@ def test_help_shows_param_descriptions(capsys: pytest.CaptureFixture[str]) -> No
     assert "[default: 10]" in out
 
 
+def test_help_shows_examples_for_corpus_tool(capsys: pytest.CaptureFixture[str]) -> None:
+    """A curated tool's ``--help`` renders the Examples block below the
+    parameter table — the example and the params coexist."""
+    jira_search = ToolSpec(
+        tool_name="jira_search",
+        service="jira",
+        command_name="search",
+        description="Search issues using JQL",
+        params=(
+            ToolParam(name="jql", type=str, required=True, default=None),
+            ToolParam(name="fields", type=str, required=False, default=None),
+            ToolParam(name="limit", type=int, required=False, default=50),
+        ),
+    )
+    app = create_app([jira_search], DispatchSpy())
+
+    with pytest.raises(SystemExit) as excinfo:
+        app(["jira", "search", "--help"], exit_on_error=True)
+
+    assert excinfo.value.code in (None, 0)
+    out = capsys.readouterr().out
+    assert "Example invocations:" in out
+    assert "assignee = currentUser()" in out
+    assert "--jql" in out  # params table and examples coexist
+
+
+def test_help_has_no_examples_for_uncurated_tool(capsys: pytest.CaptureFixture[str]) -> None:
+    get_worklog = ToolSpec(
+        tool_name="jira_get_issue_worklog",
+        service="jira",
+        command_name="get-issue-worklog",
+        description="Get worklog entries for an issue",
+        params=(ISSUE_KEY,),
+    )
+    app = create_app([get_worklog], DispatchSpy())
+
+    with pytest.raises(SystemExit):
+        app(["jira", "get-issue-worklog", "--help"], exit_on_error=True)
+
+    assert "Example invocations:" not in capsys.readouterr().out
+
+
+def test_dispatch_expands_at_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A string value ``@path`` reads the file before dispatch — the tool sees
+    the file's contents, never the ``@`` reference."""
+    comment = tmp_path / "comment.md"
+    comment.write_text("body from file\n", encoding="utf-8")
+    body = ToolParam(name="body", type=str, required=False, default=None)
+    spy = DispatchSpy()
+    app = create_app([jira_get_issue_spec((ISSUE_KEY, COMPACT, body))], spy)
+
+    invoke(app, ["jira", "get-issue", "--issue-key", "P", "--body", f"@{comment}"])
+
+    assert spy.calls[-1] == (
+        "jira_get_issue",
+        {"issue_key": "P", "compact": False, "body": "body from file\n"},
+    )
+    capsys.readouterr()
+
+
+def test_dispatch_missing_at_file_raises_config_error(tmp_path: Path) -> None:
+    body = ToolParam(name="body", type=str, required=False, default=None)
+    app = create_app([jira_get_issue_spec((ISSUE_KEY, COMPACT, body))], DispatchSpy())
+
+    with pytest.raises(ConfigError) as excinfo:
+        app(
+            ["jira", "get-issue", "--issue-key", "P", "--body", "@/no/such/file"],
+            exit_on_error=False,
+            print_error=False,
+        )
+    assert "file not found" in str(excinfo.value)
+
+
 def test_root_help_documents_globals(capsys: pytest.CaptureFixture[str]) -> None:
     app = create_app([], DispatchSpy())
 
@@ -337,6 +487,44 @@ def test_root_help_documents_globals(capsys: pytest.CaptureFixture[str]) -> None
     assert "--profile" in out
     assert "atli tools" in out
     assert "atli <service> <tool> --help" in out
+
+
+def test_root_help_lists_services_with_descriptions(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The root Commands table shows what each service group is, not bare
+    names — a zero-context agent learns the grammar from --help alone."""
+    app = create_app([jira_get_issue_spec(), confluence_search_spec()], DispatchSpy())
+
+    with pytest.raises(SystemExit):
+        app(["--help"], exit_on_error=True)
+
+    out = capsys.readouterr().out
+    assert "Jira tools" in out
+    assert "Confluence tools" in out
+    assert "--search" in out  # discovery bullet teaches the shortlist flag
+    assert "examples" in out  # tool-help bullet mentions examples
+
+
+def test_root_help_lists_prime(capsys: pytest.CaptureFixture[str]) -> None:
+    """`prime` is dispatched on the fast path, invisible to the built app —
+    without a display-only stub it would never appear in --help."""
+    app = create_app([], DispatchSpy())
+
+    with pytest.raises(SystemExit):
+        app(["--help"], exit_on_error=True)
+
+    out = capsys.readouterr().out
+    assert "AI-agent primer" in out
+
+
+def test_prime_stub_raises_if_ever_dispatched() -> None:
+    """Defense in depth: the stub exists for --help only. main() intercepts
+    `prime` before create_app runs, so dispatch reaching the stub is a bug."""
+    app = create_app([], DispatchSpy())
+
+    with pytest.raises(RuntimeError, match="fast path"):
+        app(["prime"], exit_on_error=False, print_error=False)
 
 
 def test_version_flag_is_a_tool_param_not_an_app_flag(capsys: pytest.CaptureFixture[str]) -> None:
@@ -525,6 +713,36 @@ def test_prime_atli_prime_missing_raises(
     app = create_prime_app({"ATLI_PRIME": "/no/such/prime.md"}, None, None)
     with pytest.raises(ConfigError):
         invoke(app, ["prime"])
+
+
+def test_prime_install_claude(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`prime --install` writes the SessionStart hook through the prime app —
+    on the fast path, with HOME pointed at a tmp dir."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    app = create_prime_app({}, None, None)
+
+    invoke(app, ["prime", "--install", "--harness", "claude"])
+
+    out = capsys.readouterr().out
+    assert out.startswith("installed:")
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert settings["hooks"]["SessionStart"][0]["hooks"][0]["command"] == (
+        "atli prime --hook-json"
+    )
+
+
+def test_prime_install_rejects_bad_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    app = create_prime_app({}, None, None)
+
+    with pytest.raises(ConfigError, match="scope"):
+        app(
+            ["prime", "--install", "--scope", "bogus"],
+            exit_on_error=False,
+            print_error=False,
+        )
 
 
 def test_prime_help_documents_flags(capsys: pytest.CaptureFixture[str]) -> None:

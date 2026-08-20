@@ -14,20 +14,22 @@ from typing import Annotated, Any
 import cyclopts
 from cyclopts import Parameter
 
-from mcp_atlassian_cli import prime
-from mcp_atlassian_cli.discovery import ToolParam, ToolSpec
+from mcp_atlassian_cli import examples, expand, install as install_mod, prime
+from mcp_atlassian_cli.config import ConfigError
+from mcp_atlassian_cli.discovery import ToolParam, ToolSpec, to_kebab
 
 Dispatch = Callable[[str, dict[str, Any]], str]
 
 _ROOT_HELP = """\
-atli - a CLI for Jira and Confluence, powered by mcp-atlassian.
+atli — a CLI for Jira and Confluence, powered by mcp-atlassian.
 
-Global flags (parsed before tool discovery, never forwarded):
-  --profile NAME   Use a config profile instead of the ambient environment.
-
-Run `atli tools` to list available tools, or `atli <service> <tool> --help`
-for a tool's parameters and defaults.
+- `atli tools [--service NAME] [--search TEXT]` — list or shortlist tools.
+- `atli <service> <tool> --help` — parameters, types, defaults, examples.
+- `--profile NAME` — global flag, always before the subcommand.
 """
+# The bullets are load-bearing: cyclopts renders help through rich, which
+# re-flows plain multi-line prose into a justified blob; markdown list items
+# are the one construct that keeps one line per item.
 
 # cyclopts defaults every App to version_flags=['--version'], which would
 # swallow the REAL `version` param of e.g. `confluence get-page-history`
@@ -86,6 +88,10 @@ def _make_handler(spec: ToolSpec, dispatch: Dispatch) -> Callable[..., None]:
             if value is None and not param.required:
                 value = param.default
             if value is not None:
+                # Applies to the final value (user-passed or schema default):
+                # the pinned mcp-atlassian surface has no '@'/'-'-only string
+                # defaults, so uniform expansion is safe and simple.
+                value = expand.expand_value(value, to_kebab(param.name))
                 arguments[param.name] = value
         print(dispatch(spec.tool_name, arguments))
 
@@ -99,12 +105,15 @@ def _make_handler(spec: ToolSpec, dispatch: Dispatch) -> Callable[..., None]:
         for param in spec.params
     )
     handler.__doc__ = spec.description
+    example_block = examples.render_examples(spec.tool_name)
+    if example_block is not None:
+        handler.__doc__ = f"{spec.description}\n\n{example_block}"
     return handler
 
 
 def _make_tools_command(specs: Sequence[ToolSpec]) -> Callable[..., None]:
-    def tools(service: str | None = None) -> None:
-        """List available tools, optionally filtered by service."""
+    def tools(service: str | None = None, *, search: str | None = None) -> None:
+        """List available tools, optionally filtered by service or keyword."""
         if not specs:
             print(
                 "No services configured — set JIRA_URL / CONFLUENCE_URL "
@@ -114,8 +123,36 @@ def _make_tools_command(specs: Sequence[ToolSpec]) -> Callable[..., None]:
         listed = [
             spec for spec in specs if service is None or spec.service == service
         ]
+        if search is not None:
+            # The haystack is the FULL description, not the printed first
+            # sentence: an agent's keyword often names what a tool does in
+            # passing, deep in the docstring.
+            needle = search.lower()
+            listed = [
+                spec
+                for spec in listed
+                if needle
+                in f"{spec.service or ''} {spec.command_name} {spec.description}".lower()
+            ]
         if not listed:
-            print(f"No tools for service '{service}'.")
+            if search is not None:
+                if service is not None:
+                    print(
+                        f"No tools in service '{service}' match '{search}'. "
+                        "Broaden the query, or run 'atli tools --search TEXT' "
+                        "across all services."
+                    )
+                else:
+                    print(
+                        f"No tools match '{search}'. "
+                        "Broaden the query, or run 'atli tools' for the full list."
+                    )
+            else:
+                print(
+                    f"No tools for service '{service}'. "
+                    "Use 'atli tools' to list all, or "
+                    "'atli tools --search TEXT' to shortlist."
+                )
             return None
         rows = [
             (
@@ -146,6 +183,16 @@ def _make_profiles_command(profiles_text: str | None) -> Callable[..., None]:
     return profiles
 
 
+def _prime_stub() -> None:
+    """Print the AI-agent primer (SessionStart hooks; see 'atli prime --install').
+
+    Display-only: the real `prime` dispatches on main()'s fast path (before
+    the mcp-atlassian import); this registration exists solely so root
+    --help lists it. Reaching it at runtime means the fast path broke.
+    """
+    raise RuntimeError("prime must dispatch via the fast path, not the help stub")
+
+
 def create_prime_app(
     environ: Mapping[str, str],
     profile_name: str | None,
@@ -160,8 +207,27 @@ def create_prime_app(
     caller, which maps it to exit 2.
     """
 
-    def prime_command(hook_json: bool = False, export: bool = False) -> None:
-        """Print an AI-agent primer for this atli setup (SessionStart-hook friendly)."""
+    def prime_command(
+        hook_json: bool = False,
+        export: bool = False,
+        install: bool = False,
+        scope: str = "user",
+        harness: list[str] | None = None,
+    ) -> None:
+        """Print an AI-agent primer for this atli setup (SessionStart-hook friendly).
+
+        ``--install`` onboards this machine instead: it merges the prime hook
+        into harness settings (idempotent, never clobbering) and prints one
+        report line per harness.
+        """
+        if install:
+            if scope not in ("user", "project"):
+                raise ConfigError("--scope must be 'user' or 'project'")
+            for line in install_mod.run_install(
+                harness, scope, home=Path.home(), cwd=Path.cwd()
+            ):
+                print(line)
+            return
         if export:
             # Bootstrap for customization: always the default, even unconfigured.
             print(prime.render_export(environ, profile_name, config_path))
@@ -200,6 +266,8 @@ def create_app(
     app = cyclopts.App(name="atli", help=_ROOT_HELP, **_NO_VERSION_FLAGS)
     app.command(_make_tools_command(specs))
     app.command(_make_profiles_command(profiles_text))
+    # Display-only (see _prime_stub): real `prime` calls never reach this app.
+    app.command(_prime_stub, name="prime")
 
     unique: dict[tuple[str | None, str], ToolSpec] = {}
     for spec in specs:
@@ -212,7 +280,16 @@ def create_app(
             app.command(handler, name=spec.command_name)
             continue
         service_app = service_apps.setdefault(
-            spec.service, cyclopts.App(name=spec.service, **_NO_VERSION_FLAGS)
+            spec.service,
+            cyclopts.App(
+                name=spec.service,
+                help=(
+                    f"{spec.service.title()} tools — run "
+                    f"`atli {spec.service} <tool> --help` for parameters "
+                    "and examples."
+                ),
+                **_NO_VERSION_FLAGS,
+            ),
         )
         service_app.command(handler, name=spec.command_name)
     for service_app in service_apps.values():
