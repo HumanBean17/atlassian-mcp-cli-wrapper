@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
 import re
 from pathlib import Path
 
@@ -14,12 +15,16 @@ _FLAG_RE = re.compile(r"^--[a-z][a-z0-9-]*$")
 
 
 def _server_tree(service: str) -> ast.Module:
-    """The parsed mcp-atlassian server module defining ``<service>_*`` tools."""
-    path = (
-        Path(__file__).resolve().parents[1]
-        / ".venv" / "lib" / "python3.11" / "site-packages"
-        / "mcp_atlassian" / "servers" / f"{service}.py"
-    )
+    """The parsed mcp-atlassian server module defining ``<service>_*`` tools.
+
+    Located through the import system (``find_spec`` — no execution, no
+    import side effects), so the guard works in any venv layout and Python
+    version, CI included.
+    """
+    spec = importlib.util.find_spec("mcp_atlassian")
+    if spec is None or not spec.submodule_search_locations:
+        pytest.fail("mcp_atlassian is not installed; cannot verify the corpus")
+    path = Path(spec.submodule_search_locations[0]) / "servers" / f"{service}.py"
     if not path.is_file():
         pytest.fail(f"mcp-atlassian server source not found at {path}")
     return ast.parse(path.read_text(encoding="utf-8"))
