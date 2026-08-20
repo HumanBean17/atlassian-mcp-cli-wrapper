@@ -154,11 +154,14 @@ atli confluence search --query "deploy"
 
 ## Discovery
 atli tools [--service jira]           # one line per tool
-atli jira get-issue --help            # params, types, defaults
+atli tools --search TEXT              # shortlist by keyword
+atli jira get-issue --help            # params, types, defaults, examples
+atli prime --install                  # onboard: SessionStart hook
 
 ## Notes
 - Tool output prints verbatim (LLM-ready markdown from mcp-atlassian).
 - Repeatable list flags repeat: `--read-users alice --read-users bob`.
+- Long values read files: `--content @page.md` ('-' stdin; '@@' literal).
 - Exit codes: 0 success, 1 tool/server failure, 2 usage/config error.
 - Startup ~1 s warm; prefer one `search` over many single-item calls.
 """
@@ -224,6 +227,25 @@ def test_render_export_when_unconfigured() -> None:
     assert "Configured: (none)\n" in rendered
     assert "atli jira get-issue --issue-key PROJ-1" in rendered
     assert 'atli confluence search --query "deploy"' in rendered
+
+
+def test_primer_teaches_search_atfile_and_install() -> None:
+    """The primer must carry the three new agent verbs: --search shortlist,
+    @file long values, and the --install onboarding command."""
+    rendered = render_export({}, None, None)
+    assert "--search TEXT" in rendered
+    assert "prime --install" in rendered
+    assert "--content @page.md" in rendered
+
+
+def test_primer_lines_stay_compact() -> None:
+    """The primer's value is its size: every static-core line stays within
+    78 columns so SessionStart injection costs as few tokens as possible."""
+    from mcp_atlassian_cli import prime as prime_mod
+
+    for block in (prime_mod._DISCOVERY, prime_mod._NOTES):
+        for line in block.splitlines():
+            assert len(line) <= 78, line
 
 
 _TRICKY = '# atli — "quoted"\n\ttab \\ end ünïcode'

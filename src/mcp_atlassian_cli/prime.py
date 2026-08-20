@@ -91,11 +91,14 @@ _CONFLUENCE_EXAMPLE = 'atli confluence search --query "deploy"'
 _DISCOVERY = """\
 ## Discovery
 atli tools [--service jira]           # one line per tool
-atli jira get-issue --help            # params, types, defaults"""
+atli tools --search TEXT              # shortlist by keyword
+atli jira get-issue --help            # params, types, defaults, examples
+atli prime --install                  # onboard: SessionStart hook"""
 _NOTES = """\
 ## Notes
 - Tool output prints verbatim (LLM-ready markdown from mcp-atlassian).
 - Repeatable list flags repeat: `--read-users alice --read-users bob`.
+- Long values read files: `--content @page.md` ('-' stdin; '@@' literal).
 - Exit codes: 0 success, 1 tool/server failure, 2 usage/config error.
 - Startup ~1 s warm; prefer one `search` over many single-item calls."""
 
