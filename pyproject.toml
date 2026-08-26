@@ -9,9 +9,16 @@ description = "atli - a CLI for Jira and Confluence, powered by mcp-atlassian"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "mcp-atlassian>=0.23,<0.24",
+    # Upstream by default; the [bitbucket] extra swaps in the fork
+    # (mcp-atlassian-with-bitbucket) instead — the two dists ship the same
+    # mcp_atlassian import package with conflicting fastmcp pins and can
+    # never coexist, hence the marker.
+    "mcp-atlassian>=0.23,<0.24; extra != \"bitbucket\"",
     "cyclopts>=4.22,<5",
 ]
+
+[project.optional-dependencies]
+bitbucket = ["mcp-atlassian-with-bitbucket>=1.0.5,<1.1"]
 
 [project.scripts]
 atli = "mcp_atlassian_cli.main:cli"
