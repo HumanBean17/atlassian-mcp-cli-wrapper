@@ -14,35 +14,70 @@ from pathlib import Path
 
 from mcp_atlassian_cli.config import ConfigError
 
-_SERVICE_ENV_PREFIXES: tuple[str, ...] = ("JIRA", "CONFLUENCE")
-"""Service names, in display order, matched against ``<NAME>_URL`` etc."""
+_AUTH_MATRIX: Mapping[
+    str, tuple[str, tuple[tuple[str | tuple[str, ...], ...], ...]]
+] = {
+    # Each service: its URL variable plus the credential combinations from
+    # the README auth matrix. A combination is a tuple of clauses; a clause
+    # is one env-var name (counts when set non-empty) or a tuple of
+    # alternative names (counts when ANY is set non-empty). A service counts
+    # as configured when the URL is set and some combination is fully
+    # satisfied. Bitbucket has no mTLS combination (the fork has none); its
+    # Cloud password accepts APP_PASSWORD or the API_TOKEN alias.
+    "jira": (
+        "JIRA_URL",
+        (
+            ("JIRA_USERNAME", "JIRA_API_TOKEN"),
+            ("JIRA_PERSONAL_TOKEN",),
+            ("JIRA_CLIENT_CERT",),
+        ),
+    ),
+    "confluence": (
+        "CONFLUENCE_URL",
+        (
+            ("CONFLUENCE_USERNAME", "CONFLUENCE_API_TOKEN"),
+            ("CONFLUENCE_PERSONAL_TOKEN",),
+            ("CONFLUENCE_CLIENT_CERT",),
+        ),
+    ),
+    "bitbucket": (
+        "BITBUCKET_URL",
+        (
+            ("BITBUCKET_USERNAME", ("BITBUCKET_APP_PASSWORD", "BITBUCKET_API_TOKEN")),
+            ("BITBUCKET_PERSONAL_TOKEN",),
+        ),
+    ),
+}
+"""Services in display order, mapped to their URL var and auth matrix."""
 
 
-def detect_services(environ: Mapping[str, str]) -> tuple[bool, bool]:
-    """Return ``(jira_configured, confluence_configured)`` for ``environ``.
+def detect_services(environ: Mapping[str, str]) -> dict[str, bool]:
+    """Per-service configured flags for ``environ``, keyed in display order.
 
-    A service counts as configured when its URL and at least one credential
-    combination from the README auth matrix are set (present and non-empty):
-    ``<S>_USERNAME``+``<S>_API_TOKEN`` (cloud or DC basic), ``<S>_PERSONAL_TOKEN``
-    (PAT), or ``<S>_CLIENT_CERT`` (mTLS; ``+KEY`` is optional). OAuth-only
+    A service counts as configured when its URL and a credential combination
+    from its auth-matrix entry are set (present and non-empty). OAuth-only
     setups are deliberately not detected.
     """
-    return tuple(  # type: ignore[return-value]
-        _configured(environ, service) for service in _SERVICE_ENV_PREFIXES
-    )
+    return {
+        service: _configured(environ, service) for service in _AUTH_MATRIX
+    }
+
+
+def _clause_satisfied(environ: Mapping[str, str], clause: str | tuple[str, ...]) -> bool:
+    """One clause: a single env name, or alternatives of which any one counts."""
+    names = (clause,) if isinstance(clause, str) else clause
+    return any(environ.get(name) for name in names)
 
 
 def _configured(environ: Mapping[str, str], service: str) -> bool:
-    """One service per the auth matrix: URL plus any credential combination."""
-    value = environ.get
-    if not value(f"{service}_URL"):
+    """One service per its auth matrix: URL plus one full combination."""
+    url_var, combinations = _AUTH_MATRIX[service]
+    if not environ.get(url_var):
         return False
-    credentials = (
-        bool(value(f"{service}_USERNAME")) and bool(value(f"{service}_API_TOKEN")),
-        bool(value(f"{service}_PERSONAL_TOKEN")),
-        bool(value(f"{service}_CLIENT_CERT")),
+    return any(
+        all(_clause_satisfied(environ, clause) for clause in combination)
+        for combination in combinations
     )
-    return any(credentials)
 
 
 def read_override(environ: Mapping[str, str]) -> str | None:
@@ -84,10 +119,11 @@ def _read_override_file(path: Path) -> str:
         raise ConfigError(f"Could not read PRIME override '{path}': {error}") from error
 
 
-_TITLE = "# atli — Jira & Confluence CLI"
+_TITLE = "# atli — Jira, Confluence & Bitbucket CLI"
 _USAGE_PATTERN = "atli [--profile NAME] <service> <tool> [flags]"
 _JIRA_EXAMPLE = "atli jira get-issue --issue-key PROJ-1"
 _CONFLUENCE_EXAMPLE = 'atli confluence search --query "deploy"'
+_BITBUCKET_EXAMPLE = "atli bitbucket list-repositories"
 _DISCOVERY = """\
 ## Discovery
 atli tools [--service jira]           # one line per tool
@@ -113,10 +149,10 @@ def render_default(
     Empty output is the silence rule: zero token cost in SessionStart hooks
     on machines where atli cannot act anyway.
     """
-    jira, confluence = detect_services(environ)
-    if not (jira or confluence):
+    services = detect_services(environ)
+    if not any(services.values()):
         return ""
-    return _assemble(jira, confluence, profile_name, config_path)
+    return _assemble(services, profile_name, config_path)
 
 
 def render_export(
@@ -126,20 +162,19 @@ def render_export(
 ) -> str:
     """The default primer for ``--export``: never silenced.
 
-    With no service configured the Configured line reads ``(none)`` and both
+    With no service configured the Configured line reads ``(none)`` and all
     example lines appear — the customization bootstrap must always print.
     """
-    jira, confluence = detect_services(environ)
-    return _assemble(jira, confluence, profile_name, config_path)
+    return _assemble(detect_services(environ), profile_name, config_path)
 
 
 def _assemble(
-    jira: bool, confluence: bool, profile_name: str | None, config_path: Path | None
+    services: Mapping[str, bool],
+    profile_name: str | None,
+    config_path: Path | None,
 ) -> str:
     """Assemble the primer: dynamic header, then the static usage core."""
-    configured = [
-        name for name, on in (("jira", jira), ("confluence", confluence)) if on
-    ]
+    configured = [name for name, on in services.items() if on]
     lines = [
         _TITLE,
         "",
@@ -152,14 +187,15 @@ def _assemble(
             lines.append(f"Profile: {profile_name} ({_display_path(config_path)})")
     lines += ["", "## Usage", _USAGE_PATTERN]
     # With nothing configured (only reachable via render_export —
-    # render_default is silent), both example lines appear so the exported
+    # render_default is silent), every example line appears so the exported
     # template is canonical.
-    show_jira = jira or not (jira or confluence)
-    show_confluence = confluence or not (jira or confluence)
-    if show_jira:
+    nothing = not configured
+    if services["jira"] or nothing:
         lines.append(_JIRA_EXAMPLE)
-    if show_confluence:
+    if services["confluence"] or nothing:
         lines.append(_CONFLUENCE_EXAMPLE)
+    if services["bitbucket"] or nothing:
+        lines.append(_BITBUCKET_EXAMPLE)
     lines += ["", _DISCOVERY, "", _NOTES]
     return "\n".join(lines) + "\n"
 

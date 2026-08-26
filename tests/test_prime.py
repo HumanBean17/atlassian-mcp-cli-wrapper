@@ -26,32 +26,48 @@ CONFLUENCE_PAT = {
     "CONFLUENCE_URL": "https://wiki.internal",
     "CONFLUENCE_PERSONAL_TOKEN": "pat-secret",
 }
+BITBUCKET_CLOUD_APP_PASSWORD = {
+    "BITBUCKET_URL": "https://bitbucket.org/team",
+    "BITBUCKET_USERNAME": "you@corp.com",
+    "BITBUCKET_APP_PASSWORD": "app-password",
+}
+BITBUCKET_SERVER_PAT = {
+    "BITBUCKET_URL": "https://bitbucket.internal",
+    "BITBUCKET_PERSONAL_TOKEN": "server-pat",
+}
+
+
+def expect(
+    jira: bool = False, confluence: bool = False, bitbucket: bool = False
+) -> dict[str, bool]:
+    """The detect_services result for the given configured services."""
+    return {"jira": jira, "confluence": confluence, "bitbucket": bitbucket}
 
 
 @pytest.mark.parametrize(
     ("environ", "expected"),
     [
-        (JIRA_CLOUD, (True, False)),
+        (JIRA_CLOUD, expect(jira=True)),
         (
             {
                 "JIRA_URL": "https://jira.internal",
                 "JIRA_PERSONAL_TOKEN": "pat",
             },
-            (True, False),
+            expect(jira=True),
         ),
         (
             {"JIRA_URL": "https://jira.internal", "JIRA_CLIENT_CERT": "/c.pem"},
-            (True, False),
+            expect(jira=True),
         ),
-        (CONFLUENCE_PAT, (False, True)),
-        ({**JIRA_CLOUD, **CONFLUENCE_PAT}, (True, True)),
-        ({"JIRA_URL": "https://corp.atlassian.net"}, (False, False)),
+        (CONFLUENCE_PAT, expect(confluence=True)),
+        ({**JIRA_CLOUD, **CONFLUENCE_PAT}, expect(jira=True, confluence=True)),
+        ({"JIRA_URL": "https://corp.atlassian.net"}, expect()),
         (
             {
                 "JIRA_URL": "https://corp.atlassian.net",
                 "JIRA_USERNAME": "you@corp.com",
             },
-            (False, False),
+            expect(),
         ),
         (
             {
@@ -59,13 +75,47 @@ CONFLUENCE_PAT = {
                 "JIRA_USERNAME": "you@corp.com",
                 "JIRA_API_TOKEN": "secret",
             },
-            (False, False),
+            expect(),
         ),
-        ({}, (False, False)),
+        ({}, expect()),
+        # Bitbucket Cloud: app password (the fork's recommended form).
+        (BITBUCKET_CLOUD_APP_PASSWORD, expect(bitbucket=True)),
+        # Bitbucket Cloud: API_TOKEN is the fork's alias for the app password.
+        (
+            {
+                "BITBUCKET_URL": "https://bitbucket.org/team",
+                "BITBUCKET_USERNAME": "you@corp.com",
+                "BITBUCKET_API_TOKEN": "api-token",
+            },
+            expect(bitbucket=True),
+        ),
+        # Bitbucket Server/DC: personal token.
+        (BITBUCKET_SERVER_PAT, expect(bitbucket=True)),
+        # URL alone, or credentials without a password, never count.
+        ({"BITBUCKET_URL": "https://bitbucket.org/team"}, expect()),
+        (
+            {
+                "BITBUCKET_URL": "https://bitbucket.org/team",
+                "BITBUCKET_USERNAME": "you@corp.com",
+            },
+            expect(),
+        ),
+        # No mTLS combination exists for bitbucket (the fork has none).
+        (
+            {"BITBUCKET_URL": "https://bitbucket.internal", "BITBUCKET_CLIENT_CERT": "/c.pem"},
+            expect(),
+        ),
+        (
+            {**JIRA_CLOUD, **CONFLUENCE_PAT, **BITBUCKET_SERVER_PAT},
+            expect(jira=True, confluence=True, bitbucket=True),
+        ),
     ],
 )
-def test_detect_services(environ: dict[str, str], expected: tuple[bool, bool]) -> None:
-    assert detect_services(environ) == expected
+def test_detect_services(environ: dict[str, str], expected: dict[str, bool]) -> None:
+    result = detect_services(environ)
+    assert result == expected
+    # Display order is fixed regardless of what is configured.
+    assert list(result) == ["jira", "confluence", "bitbucket"]
 
 
 @pytest.fixture
@@ -142,7 +192,7 @@ def test_unreadable_override_is_config_error(
 
 
 CANONICAL_PRIMER = """\
-# atli — Jira & Confluence CLI
+# atli — Jira, Confluence & Bitbucket CLI
 
 Configured: jira, confluence
 Profile: work (~/work.toml)
@@ -199,6 +249,24 @@ def test_render_default_confluence_only() -> None:
     assert "## Discovery" in rendered  # static core still present
 
 
+def test_render_default_bitbucket_only() -> None:
+    rendered = render_default(BITBUCKET_CLOUD_APP_PASSWORD, None, None)
+    assert "Configured: bitbucket\n" in rendered
+    assert "atli bitbucket list-repositories" in rendered
+    assert "atli jira get-issue --issue-key" not in rendered
+    assert 'atli confluence search --query "deploy"' not in rendered
+
+
+def test_render_default_all_three() -> None:
+    rendered = render_default(
+        {**JIRA_CLOUD, **CONFLUENCE_PAT, **BITBUCKET_SERVER_PAT}, None, None
+    )
+    assert "Configured: jira, confluence, bitbucket\n" in rendered
+    assert "atli jira get-issue --issue-key PROJ-1" in rendered
+    assert 'atli confluence search --query "deploy"' in rendered
+    assert "atli bitbucket list-repositories" in rendered
+
+
 def test_render_default_silent_when_unconfigured() -> None:
     assert render_default({}, "work", Path("/anywhere/config.toml")) == ""
 
@@ -227,6 +295,7 @@ def test_render_export_when_unconfigured() -> None:
     assert "Configured: (none)\n" in rendered
     assert "atli jira get-issue --issue-key PROJ-1" in rendered
     assert 'atli confluence search --query "deploy"' in rendered
+    assert "atli bitbucket list-repositories" in rendered
 
 
 def test_primer_teaches_search_atfile_and_install() -> None:
