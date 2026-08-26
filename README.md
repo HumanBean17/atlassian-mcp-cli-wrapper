@@ -1,15 +1,19 @@
 # atli
 
-`atli` is a command-line interface for Jira and Confluence. It exposes every
-operation of [mcp-atlassian](https://pypi.org/project/mcp-atlassian/) as an
-ordinary shell command — no MCP client, server process, or daemon. Tools are
-discovered at startup from the mcp-atlassian server itself, so new tools appear
-automatically with pinned versions.
+`atli` is a command-line interface for Jira, Confluence, and Bitbucket. It
+exposes every operation of [mcp-atlassian](https://pypi.org/project/mcp-atlassian/)
+as an ordinary shell command — no MCP client, server process, or daemon. Tools
+are discovered at startup from the mcp-atlassian server itself, so new tools
+appear automatically with pinned versions. Bitbucket support requires the
+`[bitbucket]` extra (see [Install](#install)), which swaps in the
+[mcp-atlassian-with-bitbucket](https://github.com/jellythomas/mcp-atlassian-with-bitbucket)
+fork of the server.
 
 ```
 atli tools                              # list what your credentials unlock
 atli jira get-issue --issue-key PROJ-1  # markdown, verbatim from the tool
 atli confluence search --query "deploy"
+atli bitbucket list-repositories        # with the [bitbucket] extra
 atli --profile work jira search --jql "assignee = currentUser()"
 ```
 
@@ -18,6 +22,17 @@ atli --profile work jira search --jql "assignee = currentUser()"
 ```console
 $ pipx install mcp-atlassian-cli
 ```
+
+Bitbucket support (via the fork — Jira, Confluence, **and** Bitbucket):
+
+```console
+$ pipx install "mcp-atlassian-cli[bitbucket]"
+```
+
+The two installs are mutually exclusive: both providers ship the same
+`mcp_atlassian` package with conflicting fastmcp pins, so they cannot coexist
+in one environment and pip will refuse the combination. To switch providers,
+start fresh: `pipx uninstall mcp-atlassian-cli && pipx install "mcp-atlassian-cli[bitbucket]"`.
 
 Or from a checkout:
 
@@ -28,26 +43,34 @@ $ .venv/bin/pip install -e .
 $ .venv/bin/atli tools
 ```
 
-Requires Python 3.11+. The package pins `mcp-atlassian>=0.23,<0.24` (which
-resolves to fastmcp 3.4.x today) and `cyclopts>=4.22,<5`.
+Requires Python 3.11+. The package pins `cyclopts>=4.22,<5`; the mcp-atlassian
+provider is selected by a packaging marker — upstream
+`mcp-atlassian>=0.23,<0.24` by default (fastmcp 3.4.x), or
+`mcp-atlassian-with-bitbucket>=1.0.5,<1.1` with the `[bitbucket]` extra
+(fastmcp 2.13–2.14).
 
 ## Authentication
 
 `atli` authenticates with the same environment variables as mcp-atlassian.
-Tools appear only for services you have configured — 63 Jira commands with
-`JIRA_*` set, 35 Confluence commands with `CONFLUENCE_*` set, 98 with both,
-none with neither.
+Tools appear only for services you have configured — with the default
+provider, 63 Jira commands with `JIRA_*` set, 35 Confluence commands with
+`CONFLUENCE_*` set, 98 with both, none with neither. With the `[bitbucket]`
+extra, configuring `BITBUCKET_*` adds the `bitbucket` service group.
 
-| Deployment | Jira | Confluence |
-|---|---|---|
-| **Cloud** (basic auth) | `JIRA_URL` + `JIRA_USERNAME` + `JIRA_API_TOKEN` | `CONFLUENCE_URL` + `CONFLUENCE_USERNAME` + `CONFLUENCE_API_TOKEN` |
-| **Data Center / Server** (PAT) | `JIRA_URL` + `JIRA_PERSONAL_TOKEN` | `CONFLUENCE_URL` + `CONFLUENCE_PERSONAL_TOKEN` |
-| **Data Center / Server** (mTLS) | `JIRA_URL` + `JIRA_CLIENT_CERT` (+ `JIRA_CLIENT_KEY`) | `CONFLUENCE_URL` + `CONFLUENCE_CLIENT_CERT` (+ `CONFLUENCE_CLIENT_KEY`) |
+| Deployment | Jira | Confluence | Bitbucket |
+|---|---|---|---|
+| **Cloud** (basic auth) | `JIRA_URL` + `JIRA_USERNAME` + `JIRA_API_TOKEN` | `CONFLUENCE_URL` + `CONFLUENCE_USERNAME` + `CONFLUENCE_API_TOKEN` | `BITBUCKET_URL` + `BITBUCKET_USERNAME` + `BITBUCKET_APP_PASSWORD` (or `BITBUCKET_API_TOKEN`) |
+| **Data Center / Server** (PAT) | `JIRA_URL` + `JIRA_PERSONAL_TOKEN` | `CONFLUENCE_URL` + `CONFLUENCE_PERSONAL_TOKEN` | `BITBUCKET_URL` + `BITBUCKET_PERSONAL_TOKEN` |
+| **Data Center / Server** (mTLS) | `JIRA_URL` + `JIRA_CLIENT_CERT` (+ `JIRA_CLIENT_KEY`) | `CONFLUENCE_URL` + `CONFLUENCE_CLIENT_CERT` (+ `CONFLUENCE_CLIENT_KEY`) | — |
 
 Notes:
 
 - On Cloud, username is the Atlassian account email; the API token comes from
   <https://id.atlassian.com/manage-profile/security/api-tokens>.
+- On Bitbucket Cloud, the app password is created under *Personal settings →
+  App passwords*; `BITBUCKET_API_TOKEN` is an accepted alias. The URL decides
+  Cloud vs Server: `bitbucket.org` (or any host serving `api.bitbucket.org`)
+  means Cloud, everything else means Server/Data Center.
 - On Data Center/Server, the personal token is created under *Profile → Personal Access Tokens*.
 - mTLS with an **encrypted** private key is not supported (the underlying
   library rejects it). Decrypt the key first:
@@ -76,8 +99,8 @@ The first existing file wins. Any key you set in a profile (including options
 such as `TOOLSETS = "all"`, which is unprefixed) replaces the ambient
 environment for that service prefix; prefixes the profile doesn't mention are
 left untouched. `TOOLSETS` only takes effect in a profile that also sets at
-least one service-prefixed key (`JIRA_*`/`CONFLUENCE_*`/`MCP_ATLASSIAN_*`) —
-a `TOOLSETS`-only profile changes nothing.
+least one service-prefixed key (`JIRA_*`/`CONFLUENCE_*`/`MCP_ATLASSIAN_*`/
+`BITBUCKET_*`) — a `TOOLSETS`-only profile changes nothing.
 
 ```toml
 # ~/.config/atli/config.toml
