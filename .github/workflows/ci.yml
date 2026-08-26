@@ -22,5 +22,113 @@ jobs:
         run: |
           uv venv
           uv pip install -e . pytest
+      - name: Bare install resolves to upstream (uv-side marker check)
+        run: |
+          .venv/bin/python - <<'EOF'
+          from importlib.metadata import PackageNotFoundError, distribution
+
+          try:
+              distribution("mcp-atlassian")
+          except PackageNotFoundError:
+              raise SystemExit(
+                  "marker regression: bare install lost upstream mcp-atlassian"
+              )
+          try:
+              distribution("mcp-atlassian-with-bitbucket")
+              raise SystemExit(
+                  "marker regression: bare install pulled the fork too"
+              )
+          except PackageNotFoundError:
+              pass
+          EOF
       - name: Test
         run: .venv/bin/python -m pytest
+
+  # pip-side verification of the provider marker: pip's own resolver must
+  # agree with uv about what `extra != "bitbucket"` selects. A failure here
+  # is the trigger to fall back to the inert-bare design (see the spec).
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Bare install (pip) resolves to upstream
+        run: |
+          python -m venv /tmp/bare
+          /tmp/bare/bin/pip install .
+          /tmp/bare/bin/python - <<'EOF'
+          from importlib.metadata import PackageNotFoundError, distribution
+
+          try:
+              distribution("mcp-atlassian")
+          except PackageNotFoundError:
+              raise SystemExit(
+                  "pip resolved the bare install without upstream — "
+                  "marker contract broken; fall back to inert-bare design"
+              )
+          try:
+              distribution("mcp-atlassian-with-bitbucket")
+              raise SystemExit("pip pulled the fork on a bare install")
+          except PackageNotFoundError:
+              pass
+          EOF
+      - name: "[bitbucket] install (pip) resolves to the fork only"
+        run: |
+          python -m venv /tmp/fork
+          /tmp/fork/bin/pip install ".[bitbucket]"
+          /tmp/fork/bin/python - <<'EOF'
+          from importlib.metadata import PackageNotFoundError, distribution
+
+          try:
+              distribution("mcp-atlassian-with-bitbucket")
+          except PackageNotFoundError:
+              raise SystemExit(
+                  "pip did not install the fork for [bitbucket] — "
+                  "marker contract broken; fall back to inert-bare design"
+              )
+          try:
+              distribution("mcp-atlassian")
+              raise SystemExit("pip installed upstream alongside the fork")
+          except PackageNotFoundError:
+              pass
+          EOF
+
+  # Fork leg: prove the whole CLI under mcp-atlassian-with-bitbucket and its
+  # fastmcp 2.x. Provider drift failures get fixed in the TESTS (tolerate
+  # both majors), never in production code — see the spec's shim philosophy.
+  bitbucket:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - name: Install with the fork provider
+        run: |
+          uv venv
+          uv pip install -e ".[bitbucket]" pytest
+      - name: Provider swap asserted (fork in, upstream out)
+        run: |
+          .venv/bin/python - <<'EOF'
+          from importlib.metadata import PackageNotFoundError, distribution
+
+          try:
+              distribution("mcp-atlassian-with-bitbucket")
+          except PackageNotFoundError:
+              raise SystemExit("[bitbucket] install did not bring the fork")
+          try:
+              distribution("mcp-atlassian")
+              raise SystemExit("upstream leaked into the [bitbucket] install")
+          except PackageNotFoundError:
+              pass
+          EOF
+      - name: Test
+        run: .venv/bin/python -m pytest
+      - name: Smoke — no credentials configured
+        run: |
+          .venv/bin/atli tools | grep -q "No services configured"
+          .venv/bin/atli tools | grep -q "BITBUCKET_URL"
+          test -z "$(.venv/bin/atli prime)"
