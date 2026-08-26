@@ -205,6 +205,28 @@ def test_unprefixed_tool_at_root(capsys: pytest.CaptureFixture[str]) -> None:
     assert "DISPATCHED" in capsys.readouterr().out
 
 
+def test_bitbucket_service_group(capsys: pytest.CaptureFixture[str]) -> None:
+    """A bitbucket-prefixed spec builds the `atli bitbucket <tool>` group —
+    the command tree needs no provider knowledge beyond spec.service."""
+    spec = ToolSpec(
+        tool_name="bitbucket_list_repositories",
+        service="bitbucket",
+        command_name="list-repositories",
+        description="List repositories.",
+        params=(),
+    )
+    app = create_app([spec], DispatchSpy())
+
+    with pytest.raises(SystemExit):
+        app(["--help"], exit_on_error=True)
+    out = capsys.readouterr().out
+    assert "Bitbucket tools" in out
+
+    with pytest.raises(SystemExit):
+        app(["bitbucket", "list-repositories", "--help"], exit_on_error=True)
+    assert "List repositories." in capsys.readouterr().out
+
+
 def test_tools_command_listing(capsys: pytest.CaptureFixture[str]) -> None:
     confluence_search = ToolSpec(
         tool_name="confluence_search",

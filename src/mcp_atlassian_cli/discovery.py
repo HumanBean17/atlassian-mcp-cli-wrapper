@@ -6,7 +6,7 @@ Pure functions over MCP ``Tool``-shaped objects: no server or CLI imports.
 from dataclasses import dataclass
 from typing import Any
 
-SERVICE_PREFIXES: frozenset[str] = frozenset({"jira", "confluence"})
+SERVICE_PREFIXES: frozenset[str] = frozenset({"jira", "confluence", "bitbucket"})
 
 _TYPE_MAP: dict[str, type] = {
     "string": str,
