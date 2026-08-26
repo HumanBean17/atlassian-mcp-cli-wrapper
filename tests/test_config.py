@@ -149,6 +149,48 @@ def test_apply_profile_replaces_per_service():
     assert environ["PATH"] == "/usr/bin"
 
 
+def test_apply_profile_replaces_bitbucket_prefix():
+    """A BITBUCKET_-defining profile gets the same stale-credential isolation
+    as jira/confluence: ambient BITBUCKET_* is dropped wholesale and the
+    cross-service OAuth keys are cleared with it."""
+    environ = {
+        "BITBUCKET_URL": "https://ambient.bitbucket.org",
+        "BITBUCKET_USERNAME": "ambient-user",
+        "BITBUCKET_APP_PASSWORD": "ambient-password",
+        "ATLASSIAN_OAUTH_ACCESS_TOKEN": "ambient-oauth-token",
+        "PATH": "/usr/bin",
+    }
+
+    apply_profile(
+        {
+            "BITBUCKET_URL": "https://bitbucket.internal",
+            "BITBUCKET_PERSONAL_TOKEN": "server-pat",
+        },
+        environ,
+    )
+
+    assert environ["BITBUCKET_URL"] == "https://bitbucket.internal"
+    assert environ["BITBUCKET_PERSONAL_TOKEN"] == "server-pat"
+    assert "BITBUCKET_USERNAME" not in environ
+    assert "BITBUCKET_APP_PASSWORD" not in environ
+    assert "ATLASSIAN_OAUTH_ACCESS_TOKEN" not in environ
+    assert environ["PATH"] == "/usr/bin"
+
+
+def test_apply_profile_leaves_bitbucket_untouched_when_unmentioned():
+    """A jira-only profile must not disturb ambient BITBUCKET_* values."""
+    environ = {
+        "JIRA_URL": "https://ambient.atlassian.net",
+        "BITBUCKET_URL": "https://bitbucket.internal",
+        "BITBUCKET_PERSONAL_TOKEN": "server-pat",
+    }
+
+    apply_profile({"JIRA_URL": "https://corp.atlassian.net"}, environ)
+
+    assert environ["BITBUCKET_URL"] == "https://bitbucket.internal"
+    assert environ["BITBUCKET_PERSONAL_TOKEN"] == "server-pat"
+
+
 def test_apply_profile_clears_ambient_cross_service_credentials():
     """Ambient ATLASSIAN_OAUTH_* / ATLASSIAN_EXTERNAL_AUTH_ENABLE are read by
     the library for BOTH services and take precedence over username/api-token,
@@ -254,6 +296,20 @@ def test_describe_profiles_hides_secrets(tmp_path):
 
     empty_output = describe_profiles(load_config(None), None)
     assert empty_output == "No profiles configured.\n"
+
+
+def test_describe_profiles_shows_bitbucket_url(tmp_path):
+    toml = """
+[profiles.bb]
+BITBUCKET_URL = "https://bitbucket.internal"
+BITBUCKET_PERSONAL_TOKEN = "server-pat"
+"""
+    config = load_config_from_text(tmp_path, toml)
+
+    output = describe_profiles(config, "bb")
+
+    assert "bitbucket: https://bitbucket.internal" in output
+    assert "server-pat" not in output
 
 
 def load_config_from_text(tmp_path, text: str):
