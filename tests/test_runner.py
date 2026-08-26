@@ -207,4 +207,10 @@ def test_default_app_import_failure_is_runner_error(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", fake_import)
     with pytest.raises(ToolRunnerError) as excinfo:
         ToolRunner()._app
-    assert "mcp-atlassian" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "mcp-atlassian" in message
+    # The guidance must name both provider install paths and the choose-one
+    # rule — fork users hit exactly this failure when their env is broken.
+    assert "pip install mcp-atlassian-cli" in message
+    assert "mcp-atlassian-cli[bitbucket]" in message
+    assert "cannot coexist" in message

@@ -18,18 +18,20 @@ from typing import Any
 
 from mcp_atlassian_cli.discovery import ToolSpec, parse_tool
 
-_PIN_OR_UPDATE = (
-    "Could not start the mcp-atlassian tool server. "
-    "Pin mcp-atlassian>=0.23,<0.24 (which brings fastmcp 3.4.x), "
-    "or update this CLI."
+_NO_PROVIDER = (
+    "The mcp-atlassian server is missing or broken in this environment. "
+    "Install a provider: `pip install mcp-atlassian-cli` (Jira + Confluence) "
+    "or `pip install \"mcp-atlassian-cli[bitbucket]\"` (adds Bitbucket via the "
+    "mcp-atlassian-with-bitbucket fork). The two providers cannot coexist in "
+    "one environment. Or update this CLI."
 )
 
 
 class ToolRunnerError(Exception):
     """Transport or compatibility failure.
 
-    The fix is outside this call: pin compatible mcp-atlassian/fastmcp versions
-    or update the CLI.
+    The fix is outside this call: repair the install — reinstall the package
+    with or without the ``[bitbucket]`` extra — or update the CLI.
     """
 
 
@@ -99,7 +101,7 @@ class ToolRunner:
             try:
                 from mcp_atlassian.servers.main import main_mcp
             except (ImportError, AttributeError, TypeError) as error:
-                raise ToolRunnerError(f"{_PIN_OR_UPDATE} ({error})") from error
+                raise ToolRunnerError(f"{_NO_PROVIDER} ({error})") from error
             self._app_instance = main_mcp
         return self._app_instance
 
@@ -130,7 +132,7 @@ class ToolRunner:
         except ToolRunnerError:
             raise
         except Exception as error:
-            raise ToolRunnerError(f"{_PIN_OR_UPDATE} ({error})") from error
+            raise ToolRunnerError(f"{_NO_PROVIDER} ({error})") from error
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
         """Call one tool and render its result (one ``asyncio.run``)."""
@@ -149,4 +151,4 @@ class ToolRunner:
         except ToolError as error:
             raise ToolCallFailure(str(error)) from error
         except Exception as error:
-            raise ToolRunnerError(f"{_PIN_OR_UPDATE} ({error})") from error
+            raise ToolRunnerError(f"{_NO_PROVIDER} ({error})") from error
