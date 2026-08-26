@@ -1,4 +1,4 @@
-# Provider extras & Bitbucket integration (`[atlassian]` / `[bitbucket]`)
+# Fork compatibility & Bitbucket integration (the `[bitbucket]` extra)
 
 **Status:** draft
 
@@ -29,8 +29,8 @@ Confluence:
 
 1. Fork users install and run `atli` with one documented command, getting the
    full `atli bitbucket <tool>` command group.
-2. Existing Jira/Confluence users keep today's experience via an extra with
-   one added word: `pip install "mcp-atlassian-cli[atlassian]"`.
+2. Existing Jira/Confluence users keep today's experience untouched: the bare
+   `pip install mcp-atlassian-cli` still brings upstream.
 3. Profiles, `atli profiles`, `atli prime`, and help text treat Bitbucket as a
    first-class service wherever it is configured.
 
@@ -49,50 +49,58 @@ Confluence:
 
 ## Provider model (packaging)
 
-`pyproject.toml`:
+`pyproject.toml` selects the provider with a PEP 508 extra marker on the base
+dependency:
 
-- `dependencies` = `["cyclopts>=4.22,<5"]` — no provider in the base install.
-- `[project.optional-dependencies]`, one provider each:
-  - `atlassian` → `mcp-atlassian>=0.23,<0.24` (Jira + Confluence; today's
-    experience, including fastmcp 3.4.x)
+- `dependencies`:
+  - `cyclopts>=4.22,<5`
+  - `mcp-atlassian>=0.23,<0.24; extra != "bitbucket"` — upstream by default
+- `[project.optional-dependencies]`:
   - `bitbucket` → `mcp-atlassian-with-bitbucket>=1.0.5,<1.1` (the fork: Jira +
     Confluence + Bitbucket; brings fastmcp 2.13–2.14)
+- Deliberately no `[atlassian]` extra: the bare install IS the Atlassian
+  (upstream) install.
 - Version bumps to 0.4.0 in `src/mcp_atlassian_cli/__init__.py` (pyproject
   reads it dynamically; the release workflow's version guard is unchanged).
 
 Install contract:
 
-| Audience | Command |
-|---|---|
-| Jira/Confluence users | `pipx install "mcp-atlassian-cli[atlassian]"` (or `uv tool install …`) |
-| Fork users | `pipx install "mcp-atlassian-cli[bitbucket]"` |
-| Existing users upgrading | `pipx upgrade mcp-atlassian-cli` — keeps working; pip/pipx never uninstall the provider already in the venv |
+| Audience | Command | Resolves to |
+|---|---|---|
+| Jira/Confluence users (default) | `pipx install mcp-atlassian-cli` | upstream — today's experience unchanged |
+| Fork users | `pipx install "mcp-atlassian-cli[bitbucket]"` | the fork; upstream skipped by the marker |
+| Existing users upgrading | `pipx upgrade mcp-atlassian-cli` | unchanged |
+| Both providers requested | — | pip's resolver refuses; choose-one is enforced at install time |
 
-- **Bare install** (`pip install mcp-atlassian-cli`, no extra): installs, but
-  no server comes along. The first command needing tools prints an actionable
-  error (see [Error handling](#error-handling)) naming both recipes and exits
-  1. atli never silently picks a provider — pip cannot express "upstream by
-  default, unless the user wants the fork" in one distribution.
-- **Switching providers** requires a fresh environment
-  (`pipx uninstall mcp-atlassian-cli && pipx install "mcp-atlassian-cli[bitbucket]"`);
-  in-place switching dies on pip's resolver by design. Documented.
+The "default unless extra" marker is legal PEP 508 — pip evaluates it against
+the extras requested at install time — but uncommon, so CI verifies it on
+both pip and uv legs (below); if either mishandles it, the fallback is the
+inert-bare design (bare installs ship no provider and fail with guidance).
+
+**Switching providers** requires a fresh environment
+(`pipx uninstall mcp-atlassian-cli && pipx install "mcp-atlassian-cli[bitbucket]"`);
+in-place switching dies on pip's resolver over the already-installed provider,
+by design. Documented.
 
 ## Runner compatibility
 
 `runner.py` keeps its lazy imports: `from mcp_atlassian.servers.main import
 main_mcp` (the fork preserves that path) and `from fastmcp import Client`,
 which resolves to whichever fastmcp the installed provider pulled in
-(2.13–2.14 under `[bitbucket]`, 3.4.x under `[atlassian]`). The APIs atli
+(2.13–2.14 under `[bitbucket]`, 3.4.x under the default install). The APIs atli
 uses — in-memory `Client(app)`, `list_tools()`, `call_tool()` → `.content`,
 `fastmcp.exceptions.ToolError` — exist in both majors; verification is a CI
 duty (below), not an abstraction. If drift surfaces, the fix is a thin local
 shim at the call site (in the spirit of `result_to_text`'s existing `getattr`
 defensive rendering), never a fastmcp compatibility layer.
 
-`_PIN_OR_UPDATE` is replaced by a provider-missing message naming both extras
-and the choose-one rule; `ToolRunnerError`'s docstring follows (the fix is
-now "install a provider extra, or update the CLI"). `_silence_server_logging`
-is provider-agnostic and unchanged.
+`_PIN_OR_UPDATE` is replaced by a provider-missing message naming both install
+recipes (the bare upstream install and `[bitbucket]`) plus the choose-one
+rule; under the marker contract this path means a broken environment (the
+provider was removed by hand), so the message is guidance, not an expected
+flow. `ToolRunnerError`'s docstring follows (the fix is "repair the install —
+reinstall the package with or without `[bitbucket]` — or update the CLI").
+`_silence_server_logging` is provider-agnostic and unchanged.
 
 Accepted quirk: the fork reports `mcp_atlassian.__version__ == "0.0.0"` (its
 dist name differs, so the version lookup falls back). atli never reads that
@@ -103,7 +111,8 @@ attribute; nothing gates on it.
 - **`discovery.SERVICE_PREFIXES`** gains `"bitbucket"`: the fork's
   `bitbucket_*` tools form the `atli bitbucket <tool>` command group
   (`atli bitbucket list-repositories`, `atli bitbucket get-pull-request`, …).
-  Under `[atlassian]` no such tools exist, so the entry is inert — no
+  Under the default (upstream) install no such tools exist, so the entry is
+  inert — no
   installed-provider gating anywhere.
 - **`config.SERVICE_ENV_PREFIXES`** gains `"BITBUCKET_"`: a profile defining
   any `BITBUCKET_*` key first drops every ambient `BITBUCKET_*` variable
@@ -143,9 +152,9 @@ rule — empty output when nothing is configured — is unchanged.
 
 | Situation | Behavior |
 |---|---|
-| No provider importable (`mcp_atlassian` missing) | stderr message naming both extra recipes and the choose-one rule; exit 1 |
-| Both providers force-installed in one env | Undefined behavior from file clobbering; unsupported, not detected |
-| Bitbucket vars set under `[atlassian]` | Not a failure: upstream ignores them; bitbucket simply never appears in `atli tools` |
+| No provider importable (`mcp_atlassian` missing) | Broken-environment path only (the marker contract always installs one); stderr message naming both recipes and the choose-one rule; exit 1 |
+| Both providers present in one env (force-installed) | Undefined behavior from file clobbering; unsupported, not detected |
+| Bitbucket vars set under the default install | Not a failure: upstream ignores them; bitbucket simply never appears in `atli tools` |
 | Fork env with only `BITBUCKET_*` configured | `atli tools` lists the bitbucket service group only |
 | `BITBUCKET_URL` set without credentials | Service not "configured" for prime; the fork itself decides tool mounting |
 | Everything else | Unchanged contracts (exit codes 0/1/2, EPIPE, profile errors) |
@@ -169,21 +178,31 @@ rule — empty output when nothing is configured — is unchanged.
 
 ## CI
 
-A second leg installs `.[bitbucket]` and runs the full unit suite plus a
-no-credentials smoke: `atli tools` prints the "No services configured" hint
-(naming `BITBUCKET_URL`) and `atli prime` stays silent. This leg proves the
-fastmcp-2.x path end-to-end; the existing leg keeps proving upstream. The
-`test_examples.py` corpus cross-check runs on both legs — the fork ships the
-same jira/confluence tool surface — and stays pinned to the `[atlassian]` leg
-if its source-path assumptions break on the fork.
+Two legs prove the packaging contract and the provider matrix:
+
+- **Upstream leg (existing)** — bare install (`pip install .`): asserts
+  upstream `mcp-atlassian` is present, runs the full unit suite.
+- **Fork leg (new)** — `pip install ".[bitbucket]"` plus a `uv`-based
+  install of the same extra: asserts the fork is present and upstream absent
+  (the marker working), runs the full unit suite plus a no-credentials smoke —
+  `atli tools` prints the "No services configured" hint (naming
+  `BITBUCKET_URL`), `atli prime` stays silent. This leg proves the
+  fastmcp-2.x path end-to-end.
+
+The `test_examples.py` corpus cross-check runs on both legs — the fork ships
+the same jira/confluence tool surface — and stays pinned to the upstream leg
+if its source-path assumptions break on the fork. A marker failure on either
+pip or uv triggers the documented fallback (inert-bare design) rather than a
+broken release.
 
 ## Documentation
 
-- **README** — Install section rewritten around the two extras with the
-  choose-one and fresh-environment-to-switch warnings; authentication matrix
-  gains a Bitbucket column (Cloud: `URL`+`USERNAME`+`APP_PASSWORD` or
-  `API_TOKEN`; Server: `URL`+`PERSONAL_TOKEN`; `bitbucket.org` ⇒ Cloud,
-  anything else ⇒ Server/DC); Profiles section documents the `BITBUCKET_*`
-  prefix; the dependency-pinning paragraph describes the extras model.
+- **README** — Install section rewritten around the default (upstream) and
+  the `[bitbucket]` extra, with the choose-one and
+  fresh-environment-to-switch warnings; authentication matrix gains a
+  Bitbucket column (Cloud: `URL`+`USERNAME`+`APP_PASSWORD` or `API_TOKEN`;
+  Server: `URL`+`PERSONAL_TOKEN`; `bitbucket.org` ⇒ Cloud, anything else ⇒
+  Server/DC); Profiles section documents the `BITBUCKET_*` prefix; the
+  dependency-pinning paragraph describes the marker model.
 - **AGENTS.md** — headline mentions Bitbucket; one bullet notes the
   `[bitbucket]` extra and that `bitbucket_*` tools appear only with the fork.
