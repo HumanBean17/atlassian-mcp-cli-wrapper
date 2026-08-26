@@ -33,7 +33,8 @@ jobs:
       - name: Install
         run: |
           uv venv
-          uv pip install -e . pytest build twine
+          # The suite needs a provider; upstream is the release baseline.
+          uv pip install -e ".[atlassian]" pytest build twine
       - name: Version guard — tag must match __version__
         run: |
           TAG="${GITHUB_REF_NAME#v}"

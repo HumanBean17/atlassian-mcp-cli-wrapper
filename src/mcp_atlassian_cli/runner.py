@@ -19,11 +19,11 @@ from typing import Any
 from mcp_atlassian_cli.discovery import ToolSpec, parse_tool
 
 _NO_PROVIDER = (
-    "The mcp-atlassian server is missing or broken in this environment. "
-    "Install a provider: `pip install mcp-atlassian-cli` (Jira + Confluence) "
-    "or `pip install \"mcp-atlassian-cli[bitbucket]\"` (adds Bitbucket via the "
-    "mcp-atlassian-with-bitbucket fork). The two providers cannot coexist in "
-    "one environment. Or update this CLI."
+    "No mcp-atlassian server is installed in this environment. "
+    "Install a provider: `pip install \"mcp-atlassian-cli[atlassian]\"` "
+    "(Jira + Confluence) or `pip install \"mcp-atlassian-cli[bitbucket]\"` "
+    "(adds Bitbucket via the mcp-atlassian-with-bitbucket fork). The two "
+    "providers cannot coexist in one environment. Or update this CLI."
 )
 
 

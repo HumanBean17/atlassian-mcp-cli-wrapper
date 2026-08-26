@@ -210,7 +210,7 @@ def test_default_app_import_failure_is_runner_error(monkeypatch):
     message = str(excinfo.value)
     assert "mcp-atlassian" in message
     # The guidance must name both provider install paths and the choose-one
-    # rule — fork users hit exactly this failure when their env is broken.
-    assert "pip install mcp-atlassian-cli" in message
+    # rule — this is the expected path for every bare (provider-less) install.
+    assert "mcp-atlassian-cli[atlassian]" in message
     assert "mcp-atlassian-cli[bitbucket]" in message
     assert "cannot coexist" in message

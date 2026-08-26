@@ -77,6 +77,16 @@ def expect(
             },
             expect(),
         ),
+        # A credential set to the empty string counts as unset (truthiness),
+        # for clauses as well as the URL var.
+        (
+            {
+                "JIRA_URL": "https://corp.atlassian.net",
+                "JIRA_USERNAME": "you@corp.com",
+                "JIRA_API_TOKEN": "",
+            },
+            expect(),
+        ),
         ({}, expect()),
         # Bitbucket Cloud: app password (the fork's recommended form).
         (BITBUCKET_CLOUD_APP_PASSWORD, expect(bitbucket=True)),

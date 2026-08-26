@@ -1,10 +1,15 @@
 """Tests for the provider-selection packaging contract.
 
-The base install must carry upstream mcp-atlassian ONLY when no extra is
-requested; the ``[bitbucket]`` extra swaps in the fork instead. That contract
-lives entirely in one dependency marker — a regression to an unconditional
-pin would silently break fork users' installs again, so it is guarded here at
-the metadata level (CI additionally verifies the resolved dists on pip and uv).
+The base install carries NO provider — a bare install is inert and the first
+tool command fails with guidance naming the extras. The provider comes from
+exactly one of two mutually exclusive extras: ``[atlassian]`` (upstream,
+Jira+Confluence) or ``[bitbucket]`` (the fork, which adds Bitbucket). Both
+dists ship the same ``mcp_atlassian`` import package with conflicting fastmcp
+pins, so no dependency may appear in the base ``dependencies`` at all: pip
+cannot suppress a base dependency via an extra marker (it evaluates base deps
+with ``extra=""`` even when resolving ``pkg[extra]``), so any base provider
+pin would make ``[bitbucket]`` uninstallable. CI additionally verifies the
+resolved dists on pip and uv for all three install shapes.
 """
 
 from __future__ import annotations
@@ -14,7 +19,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-MARKER_DEP = 'mcp-atlassian>=0.23,<0.24; extra != "bitbucket"'
+ATLASSIAN_EXTRA = ["mcp-atlassian>=0.23,<0.24"]
 BITBUCKET_EXTRA = ["mcp-atlassian-with-bitbucket>=1.0.5,<1.1"]
 
 
@@ -23,25 +28,21 @@ def _pyproject() -> dict:
         return tomllib.load(handle)
 
 
-def test_base_dependencies_carry_the_provider_marker() -> None:
+def test_base_dependencies_carry_no_provider() -> None:
     dependencies = _pyproject()["project"]["dependencies"]
     assert "cyclopts>=4.22,<5" in dependencies
-    assert MARKER_DEP in dependencies
-
-
-def test_mcp_atlassian_dep_never_unconditional() -> None:
-    dependencies = _pyproject()["project"]["dependencies"]
     offenders = [
         dep
         for dep in dependencies
-        if dep.startswith("mcp-atlassian") and dep != MARKER_DEP
+        if dep.startswith(("mcp-atlassian", "mcp_atlassian"))
     ]
     assert not offenders, (
-        f"unconditional provider pin(s) {offenders} would conflict with "
-        "the [bitbucket] extra — restore the 'extra != \"bitbucket\"' marker"
+        f"provider pin(s) {offenders} in base dependencies would conflict "
+        "with the [bitbucket] extra — a provider may only ship via an extra "
+        "(pip cannot suppress a base dependency via an extra marker)"
     )
 
 
-def test_bitbucket_extra_pins_the_fork() -> None:
+def test_extras_are_exactly_the_two_providers() -> None:
     extras = _pyproject()["project"]["optional-dependencies"]
-    assert extras["bitbucket"] == BITBUCKET_EXTRA
+    assert extras == {"atlassian": ATLASSIAN_EXTRA, "bitbucket": BITBUCKET_EXTRA}

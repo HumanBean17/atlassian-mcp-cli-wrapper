@@ -4,10 +4,10 @@
 exposes every operation of [mcp-atlassian](https://pypi.org/project/mcp-atlassian/)
 as an ordinary shell command — no MCP client, server process, or daemon. Tools
 are discovered at startup from the mcp-atlassian server itself, so new tools
-appear automatically with pinned versions. Bitbucket support requires the
-`[bitbucket]` extra (see [Install](#install)), which swaps in the
-[mcp-atlassian-with-bitbucket](https://github.com/jellythomas/mcp-atlassian-with-bitbucket)
-fork of the server.
+appear automatically with pinned versions. The server comes from an install
+extra: `[atlassian]` (Jira + Confluence) or `[bitbucket]`
+([mcp-atlassian-with-bitbucket](https://github.com/jellythomas/mcp-atlassian-with-bitbucket)
+— Jira, Confluence, **and** Bitbucket).
 
 ```
 atli tools                              # list what your credentials unlock
@@ -19,8 +19,10 @@ atli --profile work jira search --jql "assignee = currentUser()"
 
 ## Install
 
+Jira + Confluence (upstream mcp-atlassian):
+
 ```console
-$ pipx install mcp-atlassian-cli
+$ pipx install "mcp-atlassian-cli[atlassian]"
 ```
 
 Bitbucket support (via the fork — Jira, Confluence, **and** Bitbucket):
@@ -29,33 +31,36 @@ Bitbucket support (via the fork — Jira, Confluence, **and** Bitbucket):
 $ pipx install "mcp-atlassian-cli[bitbucket]"
 ```
 
-The two installs are mutually exclusive: both providers ship the same
-`mcp_atlassian` package with conflicting fastmcp pins, so they cannot coexist
-in one environment and pip will refuse the combination. To switch providers,
-start fresh: `pipx uninstall mcp-atlassian-cli && pipx install "mcp-atlassian-cli[bitbucket]"`.
+A bare `pipx install mcp-atlassian-cli` (no extra) installs the CLI without a
+server: the first tool command fails with a message naming both extras. The
+two providers are mutually exclusive — both ship the same `mcp_atlassian`
+package with conflicting fastmcp pins, so they cannot coexist in one
+environment and pip will refuse the combination. To switch providers, start
+fresh: `pipx uninstall mcp-atlassian-cli && pipx install "mcp-atlassian-cli[bitbucket]"`.
 
 Or from a checkout:
 
 ```console
 $ git clone <this-repo> && cd mcp-atlassian-cli
 $ python -m venv .venv
-$ .venv/bin/pip install -e .
+$ .venv/bin/pip install -e ".[atlassian]"
 $ .venv/bin/atli tools
 ```
 
 Requires Python 3.11+. The package pins `cyclopts>=4.22,<5`; the mcp-atlassian
-provider is selected by a packaging marker — upstream
-`mcp-atlassian>=0.23,<0.24` by default (fastmcp 3.4.x), or
-`mcp-atlassian-with-bitbucket>=1.0.5,<1.1` with the `[bitbucket]` extra
-(fastmcp 2.13–2.14).
+provider ships only via an extra — `mcp-atlassian>=0.23,<0.24` with
+`[atlassian]` (fastmcp 3.4.x), or `mcp-atlassian-with-bitbucket>=1.0.5,<1.1`
+with `[bitbucket]` (fastmcp 2.13–2.14). A base dependency cannot be
+suppressed by an extra marker, so the provider cannot also be a default.
 
 ## Authentication
 
 `atli` authenticates with the same environment variables as mcp-atlassian.
-Tools appear only for services you have configured — with the default
+Tools appear only for services you have configured — with the `[atlassian]`
 provider, 63 Jira commands with `JIRA_*` set, 35 Confluence commands with
 `CONFLUENCE_*` set, 98 with both, none with neither. With the `[bitbucket]`
-extra, configuring `BITBUCKET_*` adds the `bitbucket` service group.
+extra, configuring `BITBUCKET_*` adds the `bitbucket` service group (and the
+fork's jira/confluence surface matches upstream's).
 
 | Deployment | Jira | Confluence | Bitbucket |
 |---|---|---|---|
