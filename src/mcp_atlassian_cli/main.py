@@ -13,7 +13,11 @@ import os
 import sys
 from collections.abc import Callable
 
-from cyclopts.exceptions import CycloptsError, UnknownOptionError
+from cyclopts.exceptions import (
+    CycloptsError,
+    UnknownCommandError,
+    UnknownOptionError,
+)
 
 from mcp_atlassian_cli import config
 
@@ -83,6 +87,7 @@ def _run(
             return code if isinstance(code, int) else 0
         return 0
 
+    from mcp_atlassian_cli import providers
     from mcp_atlassian_cli.build import create_app
     from mcp_atlassian_cli.runner import (
         ToolCallFailure,
@@ -91,6 +96,11 @@ def _run(
     )
 
     try:
+        # Provider detection is metadata-only (never imports the server), so
+        # it is safe before the first tool call and informs both error paths
+        # below: the empty-state `atli tools` hint and the unknown-bitbucket
+        # command hint.
+        provider = providers.detect_provider()
         runner = (runner_factory or ToolRunner)()
         specs = runner.list_tool_specs()
         profiles_text = (
@@ -98,7 +108,13 @@ def _run(
             if config_data.path is None
             else config.describe_profiles(config_data, profile_name)
         )
-        app = create_app(specs, runner.call_tool, profiles_text)
+        app = create_app(
+            specs,
+            runner.call_tool,
+            profiles_text,
+            provider=provider,
+            environ=os.environ,
+        )
         app(rest_argv, exit_on_error=False, print_error=False)
     except CycloptsError as error:
         message = str(error)
@@ -111,6 +127,23 @@ def _run(
         # placement when its real problem is a bad value.
         if isinstance(error, UnknownOptionError) and error.token.keyword == "--profile":
             message = f"{message} {config.PROFILE_USAGE}"
+        # Same discipline for the bitbucket hint: ONLY an UnknownCommandError
+        # whose first unused token is exactly the group name, AND only when
+        # that name sat at the ROOT of the command line. When the group is
+        # mounted, a typo'd TOOL makes unused_tokens[0] the tool name and
+        # cyclopts' own did-you-mean applies; when the token is nested under
+        # another group (`atli jira bitbucket`), the problem is position, not
+        # provider configuration, and a config hint would misdirect.
+        if (
+            provider is not None
+            and rest_argv[:1] == ["bitbucket"]
+            and isinstance(error, UnknownCommandError)
+            and error.unused_tokens
+            and error.unused_tokens[0] == "bitbucket"
+        ):
+            hint = providers.bitbucket_hint(provider)
+            if hint:  # defensive: a future provider value without a hint stays safe
+                message = f"{message} {hint}"
         print(message, file=sys.stderr)
         return 2
     except config.ConfigError as error:

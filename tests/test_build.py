@@ -265,6 +265,111 @@ def test_tools_command_listing(capsys: pytest.CaptureFixture[str]) -> None:
     ]
 
 
+def test_root_help_documents_access(capsys: pytest.CaptureFixture[str]) -> None:
+    """The unknown-provider fallback keeps the full surface: `atli --help` is
+    the landing spot the empty-state hint points at — without access bullets
+    that pointer is a dead end. Names every env-var family and the extra."""
+    app = create_app([], DispatchSpy())
+
+    with pytest.raises(SystemExit):
+        app(["--help"], exit_on_error=True)
+
+    out = capsys.readouterr().out
+    assert "JIRA_*" in out
+    assert "CONFLUENCE_*" in out
+    assert "BITBUCKET_*" in out
+    assert "[bitbucket]" in out
+
+
+def test_root_help_upstream_omits_bitbucket(capsys: pytest.CaptureFixture[str]) -> None:
+    """Upstream cannot mount Bitbucket, so its help must not mention it — no
+    tagline name, no BITBUCKET_* bullet, no extra bullet. Discoverability
+    stays on demand: the `atli bitbucket` error hint and the README."""
+    app = create_app([], DispatchSpy(), provider="atlassian")
+
+    with pytest.raises(SystemExit):
+        app(["--help"], exit_on_error=True)
+
+    out = capsys.readouterr().out
+    assert "Bitbucket" not in out
+    assert "BITBUCKET" not in out
+    assert "Jira & Confluence" in out
+    assert "JIRA_*" in out
+    assert "CONFLUENCE_*" in out
+
+
+def test_root_help_fork_names_bitbucket_without_extra_bullet(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The fork's help names all three services and drops the
+    [bitbucket]-extra bullet — that requirement is satisfied by the very
+    install rendering the help."""
+    app = create_app([], DispatchSpy(), provider="bitbucket")
+
+    with pytest.raises(SystemExit):
+        app(["--help"], exit_on_error=True)
+
+    out = capsys.readouterr().out
+    assert "Jira, Confluence & Bitbucket" in out
+    assert "BITBUCKET_*" in out
+    assert "install extra" not in out
+
+
+def test_tools_empty_hint_upstream_with_bitbucket_env(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The trap this guards: upstream provider + BITBUCKET_* set. The hint
+    must NOT repeat 'set BITBUCKET_URL' (the user already did) — it must
+    explain that this provider cannot mount Bitbucket at all."""
+    app = create_app(
+        [],
+        DispatchSpy(),
+        provider="atlassian",
+        environ={"BITBUCKET_URL": "https://bitbucket.org"},
+    )
+    invoke(app, ["tools"])
+    assert capsys.readouterr().out.splitlines() == [
+        "No services configured — set JIRA_URL / CONFLUENCE_URL or a profile "
+        "(see atli --help). BITBUCKET_URL is set, but this environment has "
+        "the [atlassian] provider, which cannot mount Bitbucket tools — "
+        "reinstall with the [bitbucket] extra to add them (see the README)."
+    ]
+
+
+@pytest.mark.parametrize(
+    "bitbucket_url",
+    [None, ""],
+    ids=["absent", "empty"],
+)
+def test_tools_empty_hint_upstream_omits_bitbucket_vars(
+    capsys: pytest.CaptureFixture[str], bitbucket_url: str | None
+) -> None:
+    """Under upstream, BITBUCKET_* can never mount tools — naming it would
+    invite the exact mismatch the hint above then has to undo. An
+    empty-string BITBUCKET_URL counts as unset (truthiness, matching
+    prime._configured), so it must not trigger the mismatch message either."""
+    environ = {} if bitbucket_url is None else {"BITBUCKET_URL": bitbucket_url}
+    app = create_app([], DispatchSpy(), provider="atlassian", environ=environ)
+    invoke(app, ["tools"])
+    out = capsys.readouterr().out
+    assert "BITBUCKET_URL" not in out
+    assert "JIRA_URL" in out
+    assert "CONFLUENCE_URL" in out
+
+
+def test_tools_empty_hint_fork_names_all_three_services(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The fork can mount every service, so its hint names all three URL
+    variables — including BITBUCKET_URL, which upstream's hint omits."""
+    app = create_app([], DispatchSpy(), provider="bitbucket", environ={})
+    invoke(app, ["tools"])
+    out = capsys.readouterr().out
+    assert "JIRA_URL" in out
+    assert "CONFLUENCE_URL" in out
+    assert "BITBUCKET_URL" in out
+
+
 def test_tools_search(capsys: pytest.CaptureFixture[str]) -> None:
     """``--search`` shortlists by case-insensitive substring over service,
     command name, and the FULL description (not just the printed first

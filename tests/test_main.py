@@ -31,7 +31,7 @@ CONFLUENCE_PERSONAL_TOKEN = "partner-secret"
 CORP_URL = "https://corp.atlassian.net"
 CORP_TOKEN = "corp-secret"
 
-_SERVICE_ENV_PREFIXES = ("JIRA_", "CONFLUENCE_", "MCP_ATLASSIAN_")
+_SERVICE_ENV_PREFIXES = ("JIRA_", "CONFLUENCE_", "MCP_ATLASSIAN_", "BITBUCKET_")
 _CROSS_SERVICE_KEYS = (
     "ATLASSIAN_OAUTH_ENABLE",
     "ATLASSIAN_OAUTH_CLIENT_ID",
@@ -367,6 +367,131 @@ def test_main_tools_hint_when_empty(capsys: pytest.CaptureFixture[str]) -> None:
     out, err = capsys.readouterr()
     assert code == 0
     assert "No services configured" in out
+    assert err == ""
+
+
+def _patch_provider(monkeypatch: pytest.MonkeyPatch, provider: str | None) -> None:
+    """Pin provider detection for one test.
+
+    CI installs exactly one provider per leg and a developer checkout may
+    have either — tests that assert provider-dependent hints must never read
+    the ambient distribution metadata.
+    """
+    from mcp_atlassian_cli import providers
+
+    monkeypatch.setattr(providers, "detect_provider", lambda: provider)
+
+
+def test_main_tools_empty_hint_upstream_with_bitbucket_env(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The misleading-hint regression: upstream provider, BITBUCKET_* set —
+    `atli tools` must explain the provider mismatch, not ask for BITBUCKET_URL."""
+    from fastmcp import FastMCP
+
+    _patch_provider(monkeypatch, "atlassian")
+    monkeypatch.setenv("BITBUCKET_URL", "https://bitbucket.org")
+
+    code = main(["tools"], runner_factory=stub_factory(FastMCP("empty")))
+    out, err = capsys.readouterr()
+
+    assert code == 0
+    assert "BITBUCKET_URL is set" in out
+    assert "[bitbucket] extra" in out
+    assert err == ""
+
+
+def test_main_unknown_bitbucket_command_hints_extra(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`atli bitbucket ...` under the upstream provider is a usage error whose
+    message must name the fix — cyclopts' bare unknown-command text dead-ends."""
+    _patch_provider(monkeypatch, "atlassian")
+    code = main(["bitbucket", "list-repositories"], runner_factory=lambda: SpyRunner())
+    out, err = capsys.readouterr()
+    assert code == 2
+    assert 'Unknown command "bitbucket"' in err
+    assert "mcp-atlassian-cli[bitbucket]" in err
+    assert out == ""
+
+
+def test_main_unknown_bitbucket_command_hints_env_under_fork(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Same unknown command under the fork means unconfigured access, not a
+    missing install — the hint points at BITBUCKET_* credentials."""
+    _patch_provider(monkeypatch, "bitbucket")
+    code = main(["bitbucket", "list-repositories"], runner_factory=lambda: SpyRunner())
+    out, err = capsys.readouterr()
+    assert code == 2
+    assert "BITBUCKET_URL" in err
+    assert "pip install" not in err
+    assert out == ""
+
+
+def test_main_unknown_bitbucket_typo_under_mounted_group_gets_no_hint(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """With Bitbucket mounted, a typo'd TOOL fails inside the group — the
+    unknown token is the tool name, not `bitbucket`, and cyclopts' own
+    did-you-mean applies. The provider hint must stay out of the way."""
+    _patch_provider(monkeypatch, "bitbucket")
+
+    class BitbucketRunner(SpyRunner):
+        def list_tool_specs(self) -> list[ToolSpec]:
+            return [
+                ToolSpec(
+                    tool_name="bitbucket_list_repositories",
+                    service="bitbucket",
+                    command_name="list-repositories",
+                    description="List repositories.",
+                    params=(),
+                )
+            ]
+
+    code = main(
+        ["bitbucket", "list-repositorys"], runner_factory=lambda: BitbucketRunner()
+    )
+    out, err = capsys.readouterr()
+    assert code == 2
+    assert 'Unknown command "list-repositorys"' in err
+    # Both provider hints must stay out: provider is pinned to the fork, so
+    # the one that could wrongly fire here is the env hint — asserting only
+    # against the extra-recipe text would let a fork-hint regression through.
+    assert "mcp-atlassian-cli[bitbucket]" not in err
+    assert "BITBUCKET_URL" not in err
+    assert out == ""
+
+
+def test_main_nested_bitbucket_token_gets_no_hint(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`atli jira bitbucket` nests the token under a mounted group: the
+    problem is position, not provider configuration, and a hint about
+    BITBUCKET_* credentials (or the extra) would misdirect."""
+    _patch_provider(monkeypatch, "bitbucket")
+    code = main(["jira", "bitbucket"], runner_factory=lambda: MultiServiceRunner())
+    out, err = capsys.readouterr()
+    assert code == 2
+    assert 'Unknown command "bitbucket"' in err
+    assert "mcp-atlassian-cli[bitbucket]" not in err
+    assert "BITBUCKET_URL" not in err
+    assert out == ""
+
+
+def test_main_bitbucket_help_under_upstream_rescues_to_root_help(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`atli bitbucket --help` under upstream: cyclopts help-rescues the
+    unknown command to the (Bitbucket-free) root help with exit 0, and the
+    provider hint never fires — it belongs to the dispatch error, not the
+    help path. Pins this rescue so it cannot drift silently."""
+    _patch_provider(monkeypatch, "atlassian")
+    code = main(["bitbucket", "--help"], runner_factory=lambda: SpyRunner())
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert "Jira & Confluence" in out
+    assert "Bitbucket" not in out
     assert err == ""
 
 
