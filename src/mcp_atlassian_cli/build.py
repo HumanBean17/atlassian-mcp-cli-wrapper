@@ -21,7 +21,7 @@ from mcp_atlassian_cli.discovery import ToolParam, ToolSpec, to_kebab
 Dispatch = Callable[[str, dict[str, Any]], str]
 
 _ROOT_HELP = """\
-atli — a CLI for Jira and Confluence, powered by mcp-atlassian.
+atli — a CLI for Jira, Confluence & Bitbucket, powered by mcp-atlassian.
 
 - `atli tools [--service NAME] [--search TEXT]` — list or shortlist tools.
 - `atli <service> <tool> --help` — parameters, types, defaults, examples.
@@ -117,7 +117,7 @@ def _make_tools_command(specs: Sequence[ToolSpec]) -> Callable[..., None]:
         if not specs:
             print(
                 "No services configured — set JIRA_URL / CONFLUENCE_URL "
-                "or a profile (see atli --help)."
+                "/ BITBUCKET_URL or a profile (see atli --help)."
             )
             return None
         listed = [

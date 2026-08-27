@@ -58,6 +58,9 @@ def stub_app() -> Any:
         return f"found: {query}"
 
     app = FastMCP("stub")
-    app.mount(jira, namespace="jira")
-    app.mount(confluence, namespace="confluence")
+    # Positional namespace: the keyword is `namespace=` on fastmcp 3.x but
+    # `prefix=` on 2.x (the [bitbucket] provider's pin) — the positional form
+    # is the one both majors share, keeping this stub provider-agnostic.
+    app.mount(jira, "jira")
+    app.mount(confluence, "confluence")
     return app

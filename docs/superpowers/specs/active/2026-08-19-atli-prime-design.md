@@ -50,7 +50,7 @@ Default content — a static usage core under a dynamic header, with example
 commands filtered to the configured services:
 
 ```markdown
-# atli — Jira & Confluence CLI
+# atli — Jira, Confluence & Bitbucket CLI
 
 Configured: jira, confluence
 Profile: work (~/.config/atli/config.toml)

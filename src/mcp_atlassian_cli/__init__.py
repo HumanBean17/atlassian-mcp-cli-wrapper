@@ -1,3 +1,3 @@
-"""atli - a CLI for Jira and Confluence, powered by mcp-atlassian."""
+"""atli - a CLI for Jira, Confluence & Bitbucket, powered by mcp-atlassian."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

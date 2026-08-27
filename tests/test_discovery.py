@@ -16,6 +16,17 @@ def test_split_service_known():
     assert split_service("confluence_search") == ("confluence", "search")
 
 
+def test_split_service_bitbucket():
+    assert split_service("bitbucket_list_repositories") == (
+        "bitbucket",
+        "list_repositories",
+    )
+    assert split_service("bitbucket_get_pull_request") == (
+        "bitbucket",
+        "get_pull_request",
+    )
+
+
 def test_split_service_unknown():
     assert split_service("health_check") == (None, "health_check")
     assert split_service("jira") == (None, "jira")
@@ -68,6 +79,24 @@ def test_parse_tool_full():
         None,
         None,
     ]
+
+
+def test_parse_tool_bitbucket():
+    tool = SimpleNamespace(
+        name="bitbucket_get_pull_request",
+        description="Get a pull request.",
+        inputSchema={
+            "type": "object",
+            "properties": {"repo_slug": {"type": "string"}},
+            "required": ["repo_slug"],
+        },
+    )
+
+    spec = parse_tool(tool)
+
+    assert spec.service == "bitbucket"
+    assert spec.command_name == "get-pull-request"
+    assert spec.params[0].required is True
 
 
 def test_parse_tool_no_description():

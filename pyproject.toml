@@ -9,9 +9,17 @@ description = "atli - a CLI for Jira and Confluence, powered by mcp-atlassian"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "mcp-atlassian>=0.23,<0.24",
+    # No provider in the base install: pip's resolver cannot suppress a base
+    # dependency for an extra (it evaluates base deps with extra="" even when
+    # resolving pkg[extra]), so "upstream unless [bitbucket]" is unexpressible
+    # and the marker variant shipped broken. The provider comes from an extra:
+    # [atlassian] = upstream (Jira+Confluence), [bitbucket] = the fork.
     "cyclopts>=4.22,<5",
 ]
+
+[project.optional-dependencies]
+atlassian = ["mcp-atlassian>=0.23,<0.24"]
+bitbucket = ["mcp-atlassian-with-bitbucket>=1.0.5,<1.1"]
 
 [project.scripts]
 atli = "mcp_atlassian_cli.main:cli"

@@ -489,7 +489,7 @@ def test_main_prime_never_constructs_runner(
     code = main(["prime"], runner_factory=forbidden_runner)
     out, err = capsys.readouterr()
     assert code == 0
-    assert "# atli — Jira & Confluence CLI" in out
+    assert "# atli — Jira, Confluence & Bitbucket CLI" in out
     assert err == ""
 
 

@@ -205,6 +205,28 @@ def test_unprefixed_tool_at_root(capsys: pytest.CaptureFixture[str]) -> None:
     assert "DISPATCHED" in capsys.readouterr().out
 
 
+def test_bitbucket_service_group(capsys: pytest.CaptureFixture[str]) -> None:
+    """A bitbucket-prefixed spec builds the `atli bitbucket <tool>` group —
+    the command tree needs no provider knowledge beyond spec.service."""
+    spec = ToolSpec(
+        tool_name="bitbucket_list_repositories",
+        service="bitbucket",
+        command_name="list-repositories",
+        description="List repositories.",
+        params=(),
+    )
+    app = create_app([spec], DispatchSpy())
+
+    with pytest.raises(SystemExit):
+        app(["--help"], exit_on_error=True)
+    out = capsys.readouterr().out
+    assert "Bitbucket tools" in out
+
+    with pytest.raises(SystemExit):
+        app(["bitbucket", "list-repositories", "--help"], exit_on_error=True)
+    assert "List repositories." in capsys.readouterr().out
+
+
 def test_tools_command_listing(capsys: pytest.CaptureFixture[str]) -> None:
     confluence_search = ToolSpec(
         tool_name="confluence_search",
@@ -238,7 +260,7 @@ def test_tools_command_listing(capsys: pytest.CaptureFixture[str]) -> None:
     empty_app = create_app([], DispatchSpy())
     invoke(empty_app, ["tools"])
     assert capsys.readouterr().out.splitlines() == [
-        "No services configured — set JIRA_URL / CONFLUENCE_URL "
+        "No services configured — set JIRA_URL / CONFLUENCE_URL / BITBUCKET_URL "
         "or a profile (see atli --help)."
     ]
 
@@ -487,6 +509,7 @@ def test_root_help_documents_globals(capsys: pytest.CaptureFixture[str]) -> None
     assert "--profile" in out
     assert "atli tools" in out
     assert "atli <service> <tool> --help" in out
+    assert "Bitbucket" in out  # headline names all three services
 
 
 def test_root_help_lists_services_with_descriptions(
@@ -647,7 +670,7 @@ def test_prime_prints_primer(
     app = create_prime_app(PRIME_BOTH_ENV, None, None)
     invoke(app, ["prime"])
     out = capsys.readouterr().out
-    assert "# atli — Jira & Confluence CLI" in out
+    assert "# atli — Jira, Confluence & Bitbucket CLI" in out
     assert "Configured: jira, confluence" in out
     assert "atli jira get-issue --issue-key PROJ-1" in out
     assert 'atli confluence search --query "deploy"' in out
@@ -661,7 +684,7 @@ def test_prime_hook_json_wraps_primer(
     out = capsys.readouterr().out
     assert out.count("\n") == 1  # one JSON line plus print's newline
     payload = json.loads(out)
-    assert "# atli — Jira & Confluence CLI" in (
+    assert "# atli — Jira, Confluence & Bitbucket CLI" in (
         payload["hookSpecificOutput"]["additionalContext"]
     )
 

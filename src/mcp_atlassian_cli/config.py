@@ -16,7 +16,12 @@ from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
 
-SERVICE_ENV_PREFIXES: tuple[str, ...] = ("JIRA_", "CONFLUENCE_", "MCP_ATLASSIAN_")
+SERVICE_ENV_PREFIXES: tuple[str, ...] = (
+    "JIRA_",
+    "CONFLUENCE_",
+    "MCP_ATLASSIAN_",
+    "BITBUCKET_",
+)
 """Environment-variable prefixes owned by mcp-atlassian, one per service.
 
 Applying a profile replaces the environment per prefix: if the profile defines
@@ -254,7 +259,11 @@ def describe_profiles(config: AtliConfig, active: str | None) -> str:
         if name == config.default_profile:
             header += " (default)"
         lines.append(header)
-        for env_key, label in (("JIRA_URL", "jira"), ("CONFLUENCE_URL", "confluence")):
+        for env_key, label in (
+            ("JIRA_URL", "jira"),
+            ("CONFLUENCE_URL", "confluence"),
+            ("BITBUCKET_URL", "bitbucket"),
+        ):
             if env_key in profile:
                 lines.append(f"    {label}: {profile[env_key]}")
     return "\n".join(lines) + "\n"
