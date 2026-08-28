@@ -193,18 +193,47 @@ def test_lazy_default_app():
     # some *other* test in this process imported mcp_atlassian (some do).
 
 
-def test_default_app_import_failure_is_runner_error(monkeypatch):
-    """A broken mcp_atlassian install surfaces as ToolRunnerError, never ImportError."""
+def _fake_installed_dists(monkeypatch, versions: dict[str, str]) -> None:
+    """Point ``importlib.metadata`` at a fake environment: name -> version.
+
+    The guidance logic must be tested against pinned environments, not
+    whatever this dev venv happens to have installed.
+    """
+    import importlib.metadata
+
+    def fake_distribution(name):
+        if name not in versions:
+            raise importlib.metadata.PackageNotFoundError(name)
+        return SimpleNamespace(version=versions[name])
+
+    def fake_version(name):
+        if name not in versions:
+            raise importlib.metadata.PackageNotFoundError(name)
+        return versions[name]
+
+    monkeypatch.setattr(importlib.metadata, "distribution", fake_distribution)
+    monkeypatch.setattr(importlib.metadata, "version", fake_version)
+
+
+def _break_provider_import(monkeypatch, reason: str = "simulated broken install") -> None:
+    """Make ``from mcp_atlassian.servers.main import main_mcp`` raise ImportError."""
     import builtins
 
     real_import = builtins.__import__
 
     def fake_import(name, *args, **kwargs):
         if name == "mcp_atlassian.servers.main":
-            raise ImportError("simulated broken install")
+            raise ImportError(reason)
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
+
+
+def test_import_failure_without_provider_names_both_extras(monkeypatch):
+    """A failed import with no provider dist surfaces as ToolRunnerError
+    (never ImportError), with install guidance for both extras."""
+    _fake_installed_dists(monkeypatch, {})
+    _break_provider_import(monkeypatch)
     with pytest.raises(ToolRunnerError) as excinfo:
         ToolRunner()._app
     message = str(excinfo.value)
@@ -214,3 +243,71 @@ def test_default_app_import_failure_is_runner_error(monkeypatch):
     assert "mcp-atlassian-cli[atlassian]" in message
     assert "mcp-atlassian-cli[bitbucket]" in message
     assert "cannot coexist" in message
+    assert "simulated broken install" in message
+
+
+def test_import_failure_diagnoses_fastmcp_chimera(monkeypatch):
+    """Issue #7: fork + fastmcp 2.x + leftover fastmcp-slim. The guidance must
+    prescribe the two-step uninstall, not claim the provider is missing."""
+    _fake_installed_dists(
+        monkeypatch,
+        {
+            "mcp-atlassian-with-bitbucket": "1.0.5",
+            "fastmcp": "2.14.7",
+            "fastmcp-slim": "3.4.7",
+        },
+    )
+    _break_provider_import(
+        monkeypatch, "cannot import name 'PrivateKeyJWTClientAuthenticator'"
+    )
+    with pytest.raises(ToolRunnerError) as excinfo:
+        ToolRunner()._app
+    message = str(excinfo.value)
+    assert "pip uninstall -y fastmcp fastmcp-slim" in message
+    assert "mcp-atlassian-cli[bitbucket]" in message
+    assert "No mcp-atlassian server" not in message
+    assert "PrivateKeyJWTClientAuthenticator" in message
+
+
+def test_chimera_when_fastmcp_missing_entirely(monkeypatch):
+    """fastmcp gone + fastmcp-slim leftover: reinstalling the fork would
+    re-create the hybrid, so the same uninstall guidance must fire."""
+    _fake_installed_dists(
+        monkeypatch,
+        {"mcp-atlassian-with-bitbucket": "1.0.5", "fastmcp-slim": "3.4.7"},
+    )
+    _break_provider_import(monkeypatch)
+    with pytest.raises(ToolRunnerError) as excinfo:
+        ToolRunner()._app
+    assert "pip uninstall -y fastmcp fastmcp-slim" in str(excinfo.value)
+
+
+def test_coherent_upstream_fastmcp3_is_not_chimera(monkeypatch):
+    """Upstream provider with its normal fastmcp 3.x meta + slim pairing: the
+    failure is generic — no misleading uninstall-both advice."""
+    _fake_installed_dists(
+        monkeypatch,
+        {
+            "mcp-atlassian": "0.23.1",
+            "fastmcp": "3.4.7",
+            "fastmcp-slim": "3.4.7",
+        },
+    )
+    _break_provider_import(monkeypatch)
+    with pytest.raises(ToolRunnerError) as excinfo:
+        ToolRunner()._app
+    message = str(excinfo.value)
+    assert "mcp-atlassian-cli[atlassian]" in message
+    assert "pip uninstall" not in message
+
+
+def test_import_failure_provider_without_slim(monkeypatch):
+    """Fork installed, no fastmcp-slim anywhere: generic reinstall guidance."""
+    _fake_installed_dists(monkeypatch, {"mcp-atlassian-with-bitbucket": "1.0.5"})
+    _break_provider_import(monkeypatch)
+    with pytest.raises(ToolRunnerError) as excinfo:
+        ToolRunner()._app
+    message = str(excinfo.value)
+    assert "mcp-atlassian-cli[bitbucket]" in message
+    assert "pip uninstall" not in message
+    assert "No mcp-atlassian server" not in message

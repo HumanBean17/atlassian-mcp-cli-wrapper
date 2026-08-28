@@ -20,16 +20,47 @@ from mcp_atlassian_cli.discovery import ToolParam, ToolSpec, to_kebab
 
 Dispatch = Callable[[str, dict[str, Any]], str]
 
-_ROOT_HELP = """\
-atli — a CLI for Jira, Confluence & Bitbucket, powered by mcp-atlassian.
-
+_ROOT_TAIL = """\
 - `atli tools [--service NAME] [--search TEXT]` — list or shortlist tools.
 - `atli <service> <tool> --help` — parameters, types, defaults, examples.
 - `--profile NAME` — global flag, always before the subcommand.
 """
 # The bullets are load-bearing: cyclopts renders help through rich, which
 # re-flows plain multi-line prose into a justified blob; markdown list items
-# are the one construct that keeps one line per item.
+# are the one construct that keeps one line per item. The access bullet is
+# the non-dead-end landing spot the `atli tools` empty-state hint points at.
+
+
+def _root_help(provider: str | None) -> str:
+    """Root help, tailored to what this install can mount.
+
+    Bitbucket appears only where it is real. The fork's help names all three
+    services but drops the now-satisfied ``[bitbucket]``-extra bullet;
+    upstream's help omits Bitbucket entirely — a service the environment
+    cannot mount is noise, and its discoverability is served on demand by the
+    ``atli bitbucket`` error hint and the README. The unknown-provider
+    fallback keeps the full text (a bare install never reaches help in
+    production — the runner's provider error fires first — so it exists for
+    tests and hypothetical future callers).
+    """
+    if provider == "atlassian":
+        headline = "atli — a CLI for Jira & Confluence, powered by mcp-atlassian."
+        access = "- Access: `JIRA_*` / `CONFLUENCE_*` env vars, or a profile.\n"
+    else:
+        headline = (
+            "atli — a CLI for Jira, Confluence & Bitbucket, "
+            "powered by mcp-atlassian."
+        )
+        families = "- Access: `JIRA_*` / `CONFLUENCE_*` / `BITBUCKET_*` env vars, or a profile.\n"
+        if provider == "bitbucket":
+            access = families
+        else:
+            access = (
+                families
+                + "- Bitbucket needs the `[bitbucket]` install extra "
+                "(see the README for auth).\n"
+            )
+    return f"{headline}\n\n{access}{_ROOT_TAIL}"
 
 # cyclopts defaults every App to version_flags=['--version'], which would
 # swallow the REAL `version` param of e.g. `confluence get-page-history`
@@ -111,14 +142,42 @@ def _make_handler(spec: ToolSpec, dispatch: Dispatch) -> Callable[..., None]:
     return handler
 
 
-def _make_tools_command(specs: Sequence[ToolSpec]) -> Callable[..., None]:
+def _empty_tools_message(provider: str | None, environ: Mapping[str, str]) -> str:
+    """The `atli tools` empty-state hint, tuned to what the provider can mount.
+
+    Naming ``BITBUCKET_URL`` under the ``[atlassian]`` provider would invite
+    the exact trap this guards against: the variable is set, tools still never
+    appear, and the hint reads as if the user hadn't followed it. So upstream
+    names only the variables it can act on, and calls out the mismatch when
+    ``BITBUCKET_URL`` is already set.
+    """
+    if provider != "atlassian":
+        return (
+            "No services configured — set JIRA_URL / CONFLUENCE_URL / BITBUCKET_URL "
+            "or a profile (see atli --help)."
+        )
+    if environ.get("BITBUCKET_URL"):
+        return (
+            "No services configured — set JIRA_URL / CONFLUENCE_URL or a profile "
+            "(see atli --help). BITBUCKET_URL is set, but this environment has "
+            "the [atlassian] provider, which cannot mount Bitbucket tools — "
+            "reinstall with the [bitbucket] extra to add them (see the README)."
+        )
+    return (
+        "No services configured — set JIRA_URL / CONFLUENCE_URL "
+        "or a profile (see atli --help)."
+    )
+
+
+def _make_tools_command(
+    specs: Sequence[ToolSpec],
+    provider: str | None,
+    environ: Mapping[str, str],
+) -> Callable[..., None]:
     def tools(service: str | None = None, *, search: str | None = None) -> None:
         """List available tools, optionally filtered by service or keyword."""
         if not specs:
-            print(
-                "No services configured — set JIRA_URL / CONFLUENCE_URL "
-                "/ BITBUCKET_URL or a profile (see atli --help)."
-            )
+            print(_empty_tools_message(provider, environ))
             return None
         listed = [
             spec for spec in specs if service is None or spec.service == service
@@ -256,15 +315,22 @@ def create_app(
     specs: Sequence[ToolSpec],
     dispatch: Dispatch,
     profiles_text: str | None = None,
+    *,
+    provider: str | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> cyclopts.App:
     """Assemble the ``atli`` root app: built-ins plus one command per spec.
 
     Assumes no two specs share the same service + command name; if they do,
     the later spec wins silently (cyclopts would otherwise reject the
-    duplicate registration).
+    duplicate registration). ``provider`` (from
+    :func:`mcp_atlassian_cli.providers.detect_provider`) and ``environ`` (the
+    post-profile environment) tune the `atli tools` empty-state hint to what
+    this installation can actually mount; both default to "no knowledge",
+    which keeps the hint generic.
     """
-    app = cyclopts.App(name="atli", help=_ROOT_HELP, **_NO_VERSION_FLAGS)
-    app.command(_make_tools_command(specs))
+    app = cyclopts.App(name="atli", help=_root_help(provider), **_NO_VERSION_FLAGS)
+    app.command(_make_tools_command(specs, provider, environ or {}))
     app.command(_make_profiles_command(profiles_text))
     # Display-only (see _prime_stub): real `prime` calls never reach this app.
     app.command(_prime_stub, name="prime")

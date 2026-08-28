@@ -38,6 +38,19 @@ package with conflicting fastmcp pins, so they cannot coexist in one
 environment and pip will refuse the combination. To switch providers, start
 fresh: `pipx uninstall mcp-atlassian-cli && pipx install "mcp-atlassian-cli[bitbucket]"`.
 
+With plain `pip` (no pipx venv to recreate), also uninstall the fastmcp
+distributions before switching: upstream `mcp-atlassian` uses `fastmcp>=3`, a
+meta-package that installs `fastmcp-slim` into the same `fastmcp` package
+directory that `fastmcp` 2.x (the fork's pin) uses. pip cannot undo that
+overlap when downgrading — the leftover files break imports with errors like
+`cannot import name 'PrivateKeyJWTClientAuthenticator' from
+'fastmcp.server.auth.auth'`, and no reinstall repairs it:
+
+```console
+$ pip uninstall -y fastmcp fastmcp-slim
+$ pip install "mcp-atlassian-cli[bitbucket]"
+```
+
 Or from a checkout:
 
 ```console
@@ -64,7 +77,7 @@ fork's jira/confluence surface matches upstream's).
 
 | Deployment | Jira | Confluence | Bitbucket |
 |---|---|---|---|
-| **Cloud** (basic auth) | `JIRA_URL` + `JIRA_USERNAME` + `JIRA_API_TOKEN` | `CONFLUENCE_URL` + `CONFLUENCE_USERNAME` + `CONFLUENCE_API_TOKEN` | `BITBUCKET_URL` + `BITBUCKET_USERNAME` + `BITBUCKET_APP_PASSWORD` (or `BITBUCKET_API_TOKEN`) |
+| **Cloud** (basic auth) | `JIRA_URL` + `JIRA_USERNAME` + `JIRA_API_TOKEN` | `CONFLUENCE_URL` + `CONFLUENCE_USERNAME` + `CONFLUENCE_API_TOKEN` | `BITBUCKET_URL` + `BITBUCKET_USERNAME` + `BITBUCKET_API_TOKEN` (app passwords stopped working 2026-06-09) |
 | **Data Center / Server** (PAT) | `JIRA_URL` + `JIRA_PERSONAL_TOKEN` | `CONFLUENCE_URL` + `CONFLUENCE_PERSONAL_TOKEN` | `BITBUCKET_URL` + `BITBUCKET_PERSONAL_TOKEN` |
 | **Data Center / Server** (mTLS) | `JIRA_URL` + `JIRA_CLIENT_CERT` (+ `JIRA_CLIENT_KEY`) | `CONFLUENCE_URL` + `CONFLUENCE_CLIENT_CERT` (+ `CONFLUENCE_CLIENT_KEY`) | — |
 
@@ -72,16 +85,29 @@ Notes:
 
 - On Cloud, username is the Atlassian account email; the API token comes from
   <https://id.atlassian.com/manage-profile/security/api-tokens>.
-- On Bitbucket Cloud, the app password is created under *Personal settings →
-  App passwords*; `BITBUCKET_API_TOKEN` is an accepted alias. The URL decides
-  Cloud vs Server: `bitbucket.org` (or any host serving `api.bitbucket.org`)
-  means Cloud, everything else means Server/Data Center.
+- On Bitbucket Cloud, use a scoped API token (`bb_pat_…`): *avatar →
+  Personal settings → Security → Create and manage API tokens*. Scopes follow
+  the toolsets you use — Repositories: Read + Pull requests: Read covers
+  read-only repository and pull-request work. `BITBUCKET_USERNAME` is the
+  Atlassian account email here. The older app-password method
+  (`BITBUCKET_APP_PASSWORD` + the Bitbucket username, not the email) is dead:
+  app passwords could not be created after 2025-09-09 and stopped working on
+  2026-06-09 — and the fork reads `BITBUCKET_APP_PASSWORD` first, so unset
+  any leftover or it shadows a valid API token.
+- `BITBUCKET_WORKSPACE` optionally pins a default workspace slug (Cloud
+  only) — the part after `bitbucket.org/` in repository URLs. The Bitbucket
+  URL decides Cloud vs Server: `bitbucket.org` (or any host serving
+  `api.bitbucket.org`) means Cloud, everything else means Server/Data
+  Center.
 - On Data Center/Server, the personal token is created under *Profile → Personal Access Tokens*.
 - mTLS with an **encrypted** private key is not supported (the underlying
   library rejects it). Decrypt the key first:
   `openssl rsa -in key.enc -out key`.
-- Data Center/Server also accepts username + API token via the same
-  `*_USERNAME`/`*_API_TOKEN` variables if basic auth is enabled.
+- Data Center/Server Jira and Confluence also accept username + API token via
+  the same `*_USERNAME`/`*_API_TOKEN` variables if basic auth is enabled.
+  Bitbucket Server/DC has no live basic-auth path: `BITBUCKET_API_TOKEN` is
+  Cloud-only, and its basic auth used the app password that stopped working
+  2026-06-09 — use `BITBUCKET_PERSONAL_TOKEN` there.
 - `*URL` may include `/wiki` for Confluence. The URL decides Cloud vs Data Center: hosts ending in `.atlassian.net` (also `.jira.com`, `.jira-dev.com`, `.atlassian.com`, and exact-match `api.atlassian.com`, plus the US-Gov domains) mean Cloud; everything else, including `localhost` and private IPs, means Data Center/Server.
 
 ```console
@@ -89,6 +115,15 @@ $ export JIRA_URL="https://your-company.atlassian.net"
 $ export JIRA_USERNAME="you@your-company.com"
 $ export JIRA_API_TOKEN="..."
 $ atli tools | head -3
+```
+
+Bitbucket Cloud (with the `[bitbucket]` extra):
+
+```console
+$ export BITBUCKET_URL="https://bitbucket.org"
+$ export BITBUCKET_USERNAME="you@your-company.com"
+$ export BITBUCKET_API_TOKEN="bb_pat_..."
+$ atli bitbucket list-repositories
 ```
 
 ## Profiles (multiple instances)
@@ -118,6 +153,9 @@ JIRA_API_TOKEN = "..."
 CONFLUENCE_URL = "https://your-company.atlassian.net/wiki"
 CONFLUENCE_USERNAME = "you@your-company.com"
 CONFLUENCE_API_TOKEN = "..."
+BITBUCKET_URL = "https://bitbucket.org"
+BITBUCKET_USERNAME = "you@your-company.com"
+BITBUCKET_API_TOKEN = "bb_pat_..."
 
 [profiles.dc]
 JIRA_URL = "https://jira.internal.example.com"
@@ -139,6 +177,7 @@ $ atli profiles            # lists profiles and URLs — never tokens
 * work (default)
     jira: https://your-company.atlassian.net
     confluence: https://your-company.atlassian.net/wiki
+    bitbucket: https://bitbucket.org
   dc
     jira: https://jira.internal.example.com
 $ atli --profile dc jira get-issue --issue-key OPS-42

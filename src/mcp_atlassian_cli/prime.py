@@ -23,7 +23,8 @@ _AUTH_MATRIX: Mapping[
     # alternative names (counts when ANY is set non-empty). A service counts
     # as configured when the URL is set and some combination is fully
     # satisfied. Bitbucket has no mTLS combination (the fork has none); its
-    # Cloud password accepts APP_PASSWORD or the API_TOKEN alias.
+    # Cloud secret is the API_TOKEN (the dead-since-2026-06-09 APP_PASSWORD
+    # still satisfies detection, for installs with a leftover set).
     "jira": (
         "JIRA_URL",
         (
@@ -43,7 +44,7 @@ _AUTH_MATRIX: Mapping[
     "bitbucket": (
         "BITBUCKET_URL",
         (
-            ("BITBUCKET_USERNAME", ("BITBUCKET_APP_PASSWORD", "BITBUCKET_API_TOKEN")),
+            ("BITBUCKET_USERNAME", ("BITBUCKET_API_TOKEN", "BITBUCKET_APP_PASSWORD")),
             ("BITBUCKET_PERSONAL_TOKEN",),
         ),
     ),
