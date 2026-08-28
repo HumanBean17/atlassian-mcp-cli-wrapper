@@ -284,7 +284,7 @@ def test_chimera_when_fastmcp_missing_entirely(monkeypatch):
 
 def test_coherent_upstream_fastmcp3_is_not_chimera(monkeypatch):
     """Upstream provider with its normal fastmcp 3.x meta + slim pairing: the
-    failure is generic — no misleading uninstall-both advice."""
+    failure is generic — no misleading uninstall-both-fastmcp advice."""
     _fake_installed_dists(
         monkeypatch,
         {
@@ -298,16 +298,56 @@ def test_coherent_upstream_fastmcp3_is_not_chimera(monkeypatch):
         ToolRunner()._app
     message = str(excinfo.value)
     assert "mcp-atlassian-cli[atlassian]" in message
-    assert "pip uninstall" not in message
+    assert "pip uninstall -y fastmcp fastmcp-slim" not in message
 
 
 def test_import_failure_provider_without_slim(monkeypatch):
-    """Fork installed, no fastmcp-slim anywhere: generic reinstall guidance."""
+    """Fork installed, no fastmcp-slim anywhere: the repair must actually
+    rewrite the provider's files — a plain reinstall is a pip no-op while
+    the dist reads as installed, so the advice uninstalls it first."""
     _fake_installed_dists(monkeypatch, {"mcp-atlassian-with-bitbucket": "1.0.5"})
     _break_provider_import(monkeypatch)
     with pytest.raises(ToolRunnerError) as excinfo:
         ToolRunner()._app
     message = str(excinfo.value)
+    assert "pip uninstall -y mcp-atlassian-with-bitbucket" in message
     assert "mcp-atlassian-cli[bitbucket]" in message
-    assert "pip uninstall" not in message
     assert "No mcp-atlassian server" not in message
+
+
+def test_import_failure_with_both_providers(monkeypatch):
+    """Both provider dists registered: the shared-mcp_atlassian collision.
+    Guidance must name the full uninstall (both providers + fastmcp pair)
+    and one reinstall; the fork wins the extra hint."""
+    _fake_installed_dists(
+        monkeypatch,
+        {
+            "mcp-atlassian": "0.23.1",
+            "mcp-atlassian-with-bitbucket": "1.0.5",
+            "fastmcp": "2.14.7",
+        },
+    )
+    _break_provider_import(monkeypatch)
+    with pytest.raises(ToolRunnerError) as excinfo:
+        ToolRunner()._app
+    message = str(excinfo.value)
+    assert "pip uninstall -y mcp-atlassian mcp-atlassian-with-bitbucket fastmcp fastmcp-slim" in message
+    assert "mcp-atlassian-cli[bitbucket]" in message
+    assert "No mcp-atlassian server" not in message
+
+
+def test_import_failure_missing_server_module(monkeypatch):
+    """Issue #7 follow-up: upstream's uninstall deletes the shared
+    mcp_atlassian files under the fork, and the extra reinstall is a no-op.
+    The message must point at uninstalling the provider dist itself."""
+    _fake_installed_dists(
+        monkeypatch,
+        {"mcp-atlassian-with-bitbucket": "1.0.5", "fastmcp": "2.14.7"},
+    )
+    _break_provider_import(monkeypatch, "No module named 'mcp_atlassian.servers.main'")
+    with pytest.raises(ToolRunnerError) as excinfo:
+        ToolRunner()._app
+    message = str(excinfo.value)
+    assert "pip uninstall -y mcp-atlassian-with-bitbucket" in message
+    assert "mcp-atlassian-cli[bitbucket]" in message
+    assert "No module named 'mcp_atlassian.servers.main'" in message

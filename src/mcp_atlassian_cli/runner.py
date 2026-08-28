@@ -37,16 +37,32 @@ _BROKEN_FASTMCP = (
     "your provider: {reinstall}."
 )
 
-_BROKEN_PROVIDER = (
-    "The mcp-atlassian provider is installed but fails to import — its "
-    "dependencies are likely broken. Reinstall it: {reinstall}."
+_BOTH_PROVIDERS = (
+    "Both mcp-atlassian providers are installed. They ship the same "
+    "`mcp_atlassian` package, so neither's files are safe: uninstalling "
+    "either deletes files the other needs. Remove everything involved and "
+    "reinstall one provider: `pip uninstall -y mcp-atlassian "
+    "mcp-atlassian-with-bitbucket fastmcp fastmcp-slim`, then {reinstall}."
 )
 
+_BROKEN_PROVIDER = (
+    "The mcp-atlassian provider is installed but fails to import — its "
+    "files are missing or its dependencies are broken, and a plain "
+    "reinstall is a no-op while the package reads as installed. Uninstall "
+    "it first — `pip uninstall -y {package}` — then {reinstall}."
+)
+
+# name -> (distribution to uninstall, reinstall command)
 _EXTRA_BY_PROVIDER = {
-    # Fork first: if both dists are somehow present (a state the docs rule
-    # out), the reinstall hint names the bitbucket extra.
-    "mcp-atlassian-with-bitbucket": "pip install \"mcp-atlassian-cli[bitbucket]\"",
-    "mcp-atlassian": "pip install \"mcp-atlassian-cli[atlassian]\"",
+    # Fork first: it wins the hints below if both dists are somehow present.
+    "mcp-atlassian-with-bitbucket": (
+        "mcp-atlassian-with-bitbucket",
+        "pip install \"mcp-atlassian-cli[bitbucket]\"",
+    ),
+    "mcp-atlassian": (
+        "mcp-atlassian",
+        "pip install \"mcp-atlassian-cli[atlassian]\"",
+    ),
 }
 
 
@@ -86,22 +102,26 @@ def _import_guidance(error: Exception) -> str:
     """Pick the repair message for a failed provider import.
 
     Import failures split by what ``importlib.metadata`` sees: no provider
-    distribution means a bare CLI install (install one); a provider plus
-    the fastmcp 2.x/3.x directory collision points at the two-step
-    uninstall; anything else is a generic broken install (reinstall the
-    matching extra).
+    distribution means a bare CLI install (install one); both providers at
+    once is the shared-``mcp_atlassian`` collision (uninstall everything
+    involved); a provider plus the fastmcp 2.x/3.x directory collision
+    points at the two-step fastmcp uninstall; anything else is a broken
+    install whose repair must start by uninstalling the provider — pip
+    skips file writes when the dist already reads as installed.
     """
     providers = _installed(*_EXTRA_BY_PROVIDER)
     if not providers:
         return f"{_NO_PROVIDER} ({error})"
     # Every name in ``providers`` is a key of _EXTRA_BY_PROVIDER; the fork
-    # is first, so it wins the hint if both dists are somehow present.
-    reinstall = next(
-        cmd for name, cmd in _EXTRA_BY_PROVIDER.items() if name in providers
+    # is first, so it wins the hints if both dists are somehow present.
+    package, reinstall = next(
+        hint for name, hint in _EXTRA_BY_PROVIDER.items() if name in providers
     )
+    if len(providers) > 1:
+        return f"{_BOTH_PROVIDERS.format(reinstall=reinstall)} ({error})"
     if _fastmcp_chimera():
         return f"{_BROKEN_FASTMCP.format(reinstall=reinstall)} ({error})"
-    return f"{_BROKEN_PROVIDER.format(reinstall=reinstall)} ({error})"
+    return f"{_BROKEN_PROVIDER.format(package=package, reinstall=reinstall)} ({error})"
 
 
 class ToolRunnerError(Exception):

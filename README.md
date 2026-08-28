@@ -34,20 +34,23 @@ $ pipx install "mcp-atlassian-cli[bitbucket]"
 A bare `pipx install mcp-atlassian-cli` (no extra) installs the CLI without a
 server: the first tool command fails with a message naming both extras. The
 two providers are mutually exclusive — both ship the same `mcp_atlassian`
-package with conflicting fastmcp pins, so they cannot coexist in one
-environment and pip will refuse the combination. To switch providers, start
-fresh: `pipx uninstall mcp-atlassian-cli && pipx install "mcp-atlassian-cli[bitbucket]"`.
+package, so installing one over the other or uninstalling either corrupts
+the shared files (pip only refuses when both extras are requested in a
+single install). To switch providers, start fresh: `pipx uninstall
+mcp-atlassian-cli && pipx install "mcp-atlassian-cli[bitbucket]"`.
 
-With plain `pip` (no pipx venv to recreate), also uninstall the fastmcp
-distributions before switching: upstream `mcp-atlassian` uses `fastmcp>=3`, a
-meta-package that installs `fastmcp-slim` into the same `fastmcp` package
-directory that `fastmcp` 2.x (the fork's pin) uses. pip cannot undo that
-overlap when downgrading — the leftover files break imports with errors like
-`cannot import name 'PrivateKeyJWTClientAuthenticator' from
-'fastmcp.server.auth.auth'`, and no reinstall repairs it:
+With plain `pip` (no pipx venv to recreate), uninstall the provider and
+fastmcp distributions before switching — pip skips file writes while a
+package reads as installed, and it cannot undo two other overlaps: the
+providers share `mcp_atlassian`, and `fastmcp>=3` (upstream's pin) is a
+meta-package whose `fastmcp-slim` payload writes into the same directory
+as `fastmcp` 2.x (the fork's pin). The leftovers break imports with errors
+like `No module named 'mcp_atlassian.servers.main'` or `cannot import name
+'PrivateKeyJWTClientAuthenticator' from 'fastmcp.server.auth.auth'`, and
+no reinstall repairs them:
 
 ```console
-$ pip uninstall -y fastmcp fastmcp-slim
+$ pip uninstall -y mcp-atlassian mcp-atlassian-with-bitbucket fastmcp fastmcp-slim
 $ pip install "mcp-atlassian-cli[bitbucket]"
 ```
 
