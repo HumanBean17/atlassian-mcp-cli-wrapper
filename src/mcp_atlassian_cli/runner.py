@@ -12,6 +12,7 @@ between ``list_tool_specs`` and ``call_tool``.
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 import json
 import logging
 from typing import Any
@@ -25,6 +26,82 @@ _NO_PROVIDER = (
     "(adds Bitbucket via the mcp-atlassian-with-bitbucket fork). The two "
     "providers cannot coexist in one environment. Or update this CLI."
 )
+
+_BROKEN_FASTMCP = (
+    "The mcp-atlassian provider is installed, but its fastmcp dependency is "
+    "broken: fastmcp 2.x and fastmcp-slim 3.x files are mixed in the same "
+    "`fastmcp` package directory. fastmcp>=3 is a meta-package around "
+    "fastmcp-slim (they share that directory), so installing one over the "
+    "other — e.g. switching provider extras — leaves a hybrid no reinstall "
+    "can repair. Run `pip uninstall -y fastmcp fastmcp-slim`, then reinstall "
+    "your provider: {reinstall}."
+)
+
+_BROKEN_PROVIDER = (
+    "The mcp-atlassian provider is installed but fails to import — its "
+    "dependencies are likely broken. Reinstall it: {reinstall}."
+)
+
+_EXTRA_BY_PROVIDER = {
+    # Fork first: if both dists are somehow present (a state the docs rule
+    # out), the reinstall hint names the bitbucket extra.
+    "mcp-atlassian-with-bitbucket": "pip install \"mcp-atlassian-cli[bitbucket]\"",
+    "mcp-atlassian": "pip install \"mcp-atlassian-cli[atlassian]\"",
+}
+
+
+def _installed(*names: str) -> list[str]:
+    """The subset of distribution ``names`` present in this environment."""
+    found = []
+    for name in names:
+        try:
+            importlib.metadata.distribution(name)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+        found.append(name)
+    return found
+
+
+def _fastmcp_chimera() -> bool:
+    """True when fastmcp-slim 3.x leftovers can shadow a fastmcp 2.x install.
+
+    fastmcp>=3 is a meta-package whose fastmcp-slim payload writes into the
+    same ``fastmcp`` package directory as fastmcp 2.x. When the installed
+    ``fastmcp`` is 2.x (or absent) while fastmcp-slim remains, that
+    directory holds files from both lines and imports break in mixed
+    pairs — only uninstalling BOTH distributions clears it; a reinstall on
+    top cannot remove the other one's files. fastmcp>=3 alongside slim is
+    the coherent upstream pairing, not this failure.
+    """
+    if not _installed("fastmcp-slim"):
+        return False
+    try:
+        major = int(importlib.metadata.version("fastmcp").split(".")[0])
+    except (importlib.metadata.PackageNotFoundError, ValueError):
+        return True  # slim present but fastmcp is gone/unparseable
+    return major < 3
+
+
+def _import_guidance(error: Exception) -> str:
+    """Pick the repair message for a failed provider import.
+
+    Import failures split by what ``importlib.metadata`` sees: no provider
+    distribution means a bare CLI install (install one); a provider plus
+    the fastmcp 2.x/3.x directory collision points at the two-step
+    uninstall; anything else is a generic broken install (reinstall the
+    matching extra).
+    """
+    providers = _installed(*_EXTRA_BY_PROVIDER)
+    if not providers:
+        return f"{_NO_PROVIDER} ({error})"
+    # Every name in ``providers`` is a key of _EXTRA_BY_PROVIDER; the fork
+    # is first, so it wins the hint if both dists are somehow present.
+    reinstall = next(
+        cmd for name, cmd in _EXTRA_BY_PROVIDER.items() if name in providers
+    )
+    if _fastmcp_chimera():
+        return f"{_BROKEN_FASTMCP.format(reinstall=reinstall)} ({error})"
+    return f"{_BROKEN_PROVIDER.format(reinstall=reinstall)} ({error})"
 
 
 class ToolRunnerError(Exception):
@@ -101,7 +178,7 @@ class ToolRunner:
             try:
                 from mcp_atlassian.servers.main import main_mcp
             except (ImportError, AttributeError, TypeError) as error:
-                raise ToolRunnerError(f"{_NO_PROVIDER} ({error})") from error
+                raise ToolRunnerError(_import_guidance(error)) from error
             self._app_instance = main_mcp
         return self._app_instance
 

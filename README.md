@@ -38,6 +38,19 @@ package with conflicting fastmcp pins, so they cannot coexist in one
 environment and pip will refuse the combination. To switch providers, start
 fresh: `pipx uninstall mcp-atlassian-cli && pipx install "mcp-atlassian-cli[bitbucket]"`.
 
+With plain `pip` (no pipx venv to recreate), also uninstall the fastmcp
+distributions before switching: upstream `mcp-atlassian` uses `fastmcp>=3`, a
+meta-package that installs `fastmcp-slim` into the same `fastmcp` package
+directory that `fastmcp` 2.x (the fork's pin) uses. pip cannot undo that
+overlap when downgrading — the leftover files break imports with errors like
+`cannot import name 'PrivateKeyJWTClientAuthenticator' from
+'fastmcp.server.auth.auth'`, and no reinstall repairs it:
+
+```console
+$ pip uninstall -y fastmcp fastmcp-slim
+$ pip install "mcp-atlassian-cli[bitbucket]"
+```
+
 Or from a checkout:
 
 ```console
