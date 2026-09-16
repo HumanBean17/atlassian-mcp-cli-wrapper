@@ -12,6 +12,7 @@ from conftest import isolate_home
 
 from mcp_atlassian_cli.config import ConfigError
 from mcp_atlassian_cli.prime import (
+    _display_path,
     detect_services,
     read_override,
     render_default,
@@ -298,11 +299,23 @@ def test_render_default_no_config_file_omits_profile_line() -> None:
 
 
 def test_render_default_config_path_outside_home_is_verbatim(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # On Windows the temp dir lives UNDER the user profile, so a tmp_path
+    # config would collapse to "~..." there and never reach the verbatim
+    # branch. Pin home to a sibling directory so the premise — config
+    # outside home — holds on every platform.
+    isolate_home(monkeypatch, tmp_path / "elsewhere-home")
     config_path = tmp_path / "atli.toml"
     rendered = render_default(JIRA_CLOUD, "dc", config_path)
     assert f"Profile: dc ({config_path})\n" in rendered
+
+
+def test_display_path_abbreviates_with_forward_slash(fake_home: Path) -> None:
+    # The abbreviated form is one cross-platform string: "~/" regardless of
+    # the native separator (Windows renders "~\\sub\\..." without this).
+    assert _display_path(fake_home) == "~"
+    assert _display_path(fake_home / "sub" / "work.toml") == "~/sub/work.toml"
 
 
 def test_render_export_when_unconfigured() -> None:
