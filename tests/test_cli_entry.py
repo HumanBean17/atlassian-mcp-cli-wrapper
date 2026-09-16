@@ -1,5 +1,6 @@
 """Tests for the atli CLI entry point."""
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -7,7 +8,10 @@ from pathlib import Path
 import mcp_atlassian_cli
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-ATLI = REPO_ROOT / ".venv" / "bin" / "atli"
+# venv layout: bin/ on POSIX, Scripts/ on Windows.
+ATLI = REPO_ROOT / ".venv" / ("Scripts" if os.name == "nt" else "bin") / (
+    "atli.exe" if os.name == "nt" else "atli"
+)
 
 
 def test_version_attribute():

@@ -7,24 +7,36 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Windows runs alongside Linux: platform-specific breakage (encoding,
+    # event-loop policy, console-script shims, path assumptions — #10) must
+    # fail CI, not a user's workday.
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.11", "3.12", "3.13", "3.14"]
+    runs-on: ${{ matrix.os }}
+    env:
+      # venv layout is Scripts\ on Windows, bin/ elsewhere; every step below
+      # goes through this so the matrix stays uniform. matrix.os, not
+      # runner.os: job-level env may not reference the runner context
+      # (actions/runner#2204 — the whole workflow fails validation).
+      VENV: ${{ matrix.os == 'windows-latest' && '.venv/Scripts' || '.venv/bin' }}
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
+          cache-suffix: ${{ runner.os }}
       - name: Install
         run: |
           uv venv
           uv pip install -e ".[atlassian]" pytest
       - name: "[atlassian] resolves to upstream only"
+        shell: bash
         run: |
-          .venv/bin/python - <<'EOF'
+          "$VENV/python" - <<'EOF'
           from importlib.metadata import PackageNotFoundError, distribution
 
           try:
@@ -40,7 +52,29 @@ jobs:
               pass
           EOF
       - name: Test
-        run: .venv/bin/python -m pytest
+        shell: bash
+        run: '"$VENV/python" -m pytest'
+      - name: Smoke — console script + provider import, no credentials
+        # Drives the installed entrypoint end-to-end on a clean environment:
+        # on Windows this exercises the console-script shim, the provider's
+        # SelectorEventLoop policy, and truststore injection — the import
+        # path `atli tools` takes before any credentials exist (#10).
+        shell: bash
+        run: |
+          out=$("$VENV/atli" tools); status=$?
+          test "$status" -eq 0
+          printf '%s' "$out" | grep -q "No services configured"
+      - name: Smoke — stdout hardening under a hostile encoding
+        # The no-services message contains an em-dash (U+2014), which latin-1
+        # cannot encode — under PYTHONIOENCODING=latin-1 the print crashes
+        # with UnicodeEncodeError unless _harden_stdout's backslashreplace is
+        # in place. This pins the output-side half of #10 on every leg,
+        # Windows or not (cp1252 alone would encode the em-dash and hide it).
+        shell: bash
+        run: |
+          out=$(PYTHONIOENCODING=latin-1 "$VENV/atli" tools); status=$?
+          test "$status" -eq 0
+          printf '%s' "$out" | grep -q "No services configured"
 
   # pip-side verification of the provider contract: the base install carries
   # NO provider (inert by design), and each extra resolves to exactly its

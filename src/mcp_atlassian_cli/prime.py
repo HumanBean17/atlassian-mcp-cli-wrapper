@@ -202,13 +202,20 @@ def _assemble(
 
 
 def _display_path(config_path: Path) -> str:
-    """The config path as shown in the Profile line, home abbreviated to ``~``."""
+    """The config path as shown in the Profile line, home abbreviated to ``~``.
+
+    The abbreviated portion always uses ``/`` separators: the primer is one
+    cross-platform document (pinned verbatim in tests), and a Windows-native
+    ``~\\work.toml`` would make it platform-dependent for no reader benefit.
+    Paths outside the home stay verbatim, native separators included.
+    """
     text = str(config_path)
     home = str(Path.home())
     if text == home:
         return "~"
     if text.startswith(home + os.sep):
-        return "~" + text[len(home):]
+        rest = text[len(home) + len(os.sep):]
+        return "~/" + rest.replace(os.sep, "/")
     return text
 
 

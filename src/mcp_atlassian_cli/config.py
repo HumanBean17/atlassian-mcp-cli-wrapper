@@ -52,6 +52,26 @@ profile-chosen host, so :func:`apply_profile` clears them too.
 
 PROFILE_USAGE = "Use --profile=NAME or --profile NAME (before the subcommand)."
 
+CREDENTIAL_SUFFIXES: tuple[str, ...] = (
+    "_USERNAME",
+    "_PERSONAL_TOKEN",
+    "_API_TOKEN",
+    "_APP_PASSWORD",
+    "_ACCESS_TOKEN",
+    "_CLIENT_SECRET",
+    "_CLIENT_ID",
+)
+"""Suffixes of environment variables whose value is sent verbatim inside an
+HTTP authentication header: Bearer tokens, Basic-auth usernames and passwords,
+OAuth client secrets. The HTTP stack encodes headers with the latin-1 codec,
+so a single character beyond it makes every request fail deep inside
+``http.client`` with ``'latin-1' codec can't encode characters`` (issue #10) —
+long after the value left the user's control. ``_APP_PASSWORD`` covers the
+bitbucket fork's ``BITBUCKET_APP_PASSWORD`` (Basic-auth password, read
+first, shadowing a valid token); the bare ``_PASSWORD`` is deliberately NOT
+matched because mTLS key passphrases (``*_CLIENT_KEY_PASSWORD``) are never
+header-bound and may legitimately be any text."""
+
 
 class ConfigError(Exception):
     """A user-fixable configuration problem (bad file, unknown profile, bad flag)."""
@@ -204,6 +224,58 @@ def apply_profile(
             if key not in profile:
                 environ.pop(key, None)
         environ.update(profile)
+
+
+def validate_credentials(environ: Mapping[str, str]) -> None:
+    """Reject credential values that could never survive an HTTP request.
+
+    The rejection boundary is the one the HTTP stack itself enforces: a
+    character beyond latin-1 (ordinal > 0xFF) crashes every request inside
+    ``http.client`` with ``'latin-1' codec can't encode``, and a control
+    character makes ``requests`` reject the header outright. Characters
+    within latin-1 — an accented username like ``björn`` — are left alone:
+    they encode fine and rejecting them would block working setups
+    (mojibake within latin-1 still fails server-side with an ordinary
+    auth error, which is not ours to pre-empt).
+
+    Windows keyboard-layout slips, copy-paste artifacts, and values read
+    from legacy-encoded files land past the boundary (Cyrillic is
+    U+04xx, smart quotes U+20xx) and are exactly what this catches.
+    Failing here, before the server library is imported, names the
+    variable and the offending character instead of letting a mangled
+    value die far from where it entered.
+
+    Only credential-shaped keys are checked — service-prefixed (or
+    ``ATLASSIAN_OAUTH_``) names ending in a :data:`CREDENTIAL_SUFFIXES`
+    suffix. URLs, filters, and flags may legitimately hold non-ASCII and are
+    percent-encoded downstream, never header-bound verbatim.
+    """
+    credential_prefixes = SERVICE_ENV_PREFIXES + ("ATLASSIAN_OAUTH_",)
+    for key in sorted(environ):
+        if not key.endswith(CREDENTIAL_SUFFIXES):
+            continue
+        if not key.startswith(credential_prefixes):
+            continue
+        offending = [
+            (position, char)
+            for position, char in enumerate(environ[key])
+            if ord(char) > 0xFF or not char.isprintable()
+        ]
+        if not offending:
+            continue
+        position, char = offending[0]
+        raise ConfigError(
+            f"{key} contains {len(offending)} character(s) HTTP headers "
+            f"cannot carry; the first is {char!r} (U+{ord(char):04X}) at "
+            f"position {position}. Characters beyond latin-1 make every "
+            "request fail with the cryptic \"'latin-1' codec can't encode "
+            "characters\" error; control characters are rejected as invalid "
+            "headers. The value most likely picked them up from copy-paste, "
+            "a national keyboard layout, or a file saved in a legacy "
+            "encoding. Re-enter it as plain ASCII; inspect the exact "
+            "characters with: "
+            f"python -c \"import os; print(repr(os.environ['{key}']))\""
+        )
 
 
 def extract_profile_flag(argv: list[str]) -> tuple[str | None, list[str]]:

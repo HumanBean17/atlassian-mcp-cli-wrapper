@@ -2,6 +2,8 @@
 
 import pytest
 
+from conftest import isolate_home
+
 from mcp_atlassian_cli.config import (
     ConfigError,
     apply_profile,
@@ -10,6 +12,7 @@ from mcp_atlassian_cli.config import (
     find_config_file,
     load_config,
     resolve_profile_name,
+    validate_credentials,
 )
 
 CORP_TOML = """\
@@ -45,7 +48,7 @@ def test_find_config_order(tmp_path, monkeypatch):
     home_file.write_text(CORP_TOML)
 
     monkeypatch.chdir(cwd)
-    monkeypatch.setenv("HOME", str(home_config))
+    isolate_home(monkeypatch, home_config)
     monkeypatch.delenv("ATLI_CONFIG", raising=False)
 
     assert find_config_file() == local_config
@@ -310,6 +313,100 @@ BITBUCKET_PERSONAL_TOKEN = "server-pat"
 
     assert "bitbucket: https://bitbucket.internal" in output
     assert "server-pat" not in output
+
+
+def test_validate_credentials_accepts_printable_ascii():
+    validate_credentials(
+        {
+            "JIRA_USERNAME": "you@example.com",
+            "JIRA_API_TOKEN": "AbC123+/=",
+            "CONFLUENCE_PERSONAL_TOKEN": "NzQyOTQ2OTQ",
+            "ATLASSIAN_OAUTH_CLIENT_SECRET": "s3cret",
+            "BITBUCKET_API_TOKEN": "fork-token",
+        }
+    )
+
+
+def test_validate_credentials_accepts_latin1_range_text():
+    # Accented characters encode fine in HTTP headers (requests uses
+    # latin-1 for auth values) — an accented username must keep working;
+    # rejecting it would block valid Server/DC setups.
+    validate_credentials(
+        {
+            "JIRA_USERNAME": "björn",
+            "CONFLUENCE_PERSONAL_TOKEN": "café",
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "JIRA_USERNAME",
+        "JIRA_PERSONAL_TOKEN",
+        "JIRA_API_TOKEN",
+        "CONFLUENCE_USERNAME",
+        "CONFLUENCE_PERSONAL_TOKEN",
+        "CONFLUENCE_API_TOKEN",
+        "BITBUCKET_USERNAME",
+        "BITBUCKET_PERSONAL_TOKEN",
+        "BITBUCKET_API_TOKEN",
+        "BITBUCKET_APP_PASSWORD",
+        "ATLASSIAN_OAUTH_ACCESS_TOKEN",
+        "ATLASSIAN_OAUTH_CLIENT_SECRET",
+        "ATLASSIAN_OAUTH_CLIENT_ID",
+    ],
+)
+def test_validate_credentials_rejects_beyond_latin1(variable):
+    # Every credential-shaped variable the providers actually read, pinning
+    # the suffix list end-to-end: a Cyrillic value must never slip through
+    # to the HTTP layer on any of them.
+    with pytest.raises(ConfigError, match=variable):
+        validate_credentials({variable: "пароль"})
+
+
+def test_validate_credentials_rejects_non_ascii_token():
+    # "пароль" typed in a Cyrillic layout — every char breaks latin-1 headers.
+    with pytest.raises(ConfigError) as excinfo:
+        validate_credentials({"CONFLUENCE_PERSONAL_TOKEN": "пароль"})
+
+    message = str(excinfo.value)
+    assert "CONFLUENCE_PERSONAL_TOKEN" in message
+    assert "U+043F" in message  # 'п'
+    assert "latin-1" in message
+    assert "repr" in message  # the inspect-the-value advice
+    # The secret itself must not be echoed back in full.
+    assert "пароль" not in message
+
+
+def test_validate_credentials_rejects_control_characters():
+    with pytest.raises(ConfigError, match="cannot carry"):
+        validate_credentials({"JIRA_API_TOKEN": "abc\x00def"})
+
+
+def test_validate_credentials_ignores_non_credential_variables():
+    # URLs and flags are percent-encoded downstream, never header-bound:
+    # non-ASCII there is legitimate and none of these may raise. The mTLS
+    # key passphrase is file-bound, not header-bound, so it stays unchecked.
+    validate_credentials(
+        {
+            "JIRA_URL": "https://юза.example.com",
+            "MCP_ATLASSIAN_USE_SYSTEM_TRUSTSTORE": "да",
+            "ATLASSIAN_OAUTH_ENABLE": "вкл",
+            "ATLI_PROFILE": "профиль",
+            "SOME_API_TOKEN": "not-a-service-prefix",
+            "JIRA_CLIENT_KEY_PASSWORD": "пароль-ключа",
+        }
+    )
+
+
+def test_validate_credentials_offending_character_is_first_bad_one():
+    with pytest.raises(ConfigError) as excinfo:
+        validate_credentials({"JIRA_USERNAME": "abc\u2019де"})  # curly apostrophe
+
+    message = str(excinfo.value)
+    assert "U+2019" in message
+    assert "at position 3" in message
 
 
 def load_config_from_text(tmp_path, text: str):
