@@ -77,7 +77,11 @@ def test_double_at_alone_is_a_literal_at() -> None:
     assert expand_string("@@", "body") == "@"
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
+@pytest.mark.skipif(
+    os.name != "posix"
+    or (hasattr(os, "geteuid") and os.geteuid() == 0),  # root ignores permissions
+    reason="POSIX only: chmod must actually lock reads (Windows chmod can't)",
+)
 def test_unreadable_file_is_a_config_error(tmp_path: Path) -> None:
     locked = tmp_path / "locked.md"
     locked.write_text("secret", encoding="utf-8")

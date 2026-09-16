@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+from conftest import isolate_home
 from cyclopts import App
 from cyclopts.exceptions import (
     CycloptsError,
@@ -762,7 +764,7 @@ def prime_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, P
     Returns ``(cwd, home)`` so tests can place candidate PRIME.md files.
     """
     monkeypatch.delenv("ATLI_PRIME", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    isolate_home(monkeypatch, tmp_path / "home")
     (tmp_path / "home").mkdir()
     (tmp_path / "cwd").mkdir()
     monkeypatch.chdir(tmp_path / "cwd")

@@ -3,9 +3,21 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 import pytest
+
+
+def isolate_home(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
+    """Point ``Path.home()`` at ``home`` on every platform.
+
+    ``Path.home()`` resolves through ``USERPROFILE`` on Windows and ``HOME``
+    on POSIX; tests that redirect it must set both or their home-relative
+    assertions silently read the real profile on Windows runners.
+    """
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
 
 
 @pytest.fixture

@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import isolate_home
+
 from mcp_atlassian_cli.config import ConfigError
 from mcp_atlassian_cli.prime import (
     detect_services,
@@ -137,7 +139,7 @@ def override_dirs(
     Returns ``(cwd, home)`` so tests can place candidate PRIME.md files.
     """
     monkeypatch.delenv("ATLI_PRIME", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    isolate_home(monkeypatch, tmp_path / "home")
     (tmp_path / "home").mkdir()
     (tmp_path / "cwd").mkdir()
     monkeypatch.chdir(tmp_path / "cwd")
@@ -189,7 +191,11 @@ def test_no_override_anywhere(override_dirs: tuple[Path, Path]) -> None:
     assert read_override(os.environ) is None
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
+@pytest.mark.skipif(
+    os.name != "posix"
+    or (hasattr(os, "geteuid") and os.geteuid() == 0),  # root ignores permissions
+    reason="POSIX only: chmod must actually lock reads (Windows chmod can't)",
+)
 def test_unreadable_override_is_config_error(
     override_dirs: tuple[Path, Path],
 ) -> None:
@@ -231,7 +237,7 @@ atli prime --install                  # onboard: SessionStart hook
 def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    isolate_home(monkeypatch, home)
     return home
 
 

@@ -12,8 +12,10 @@ from typing import Any
 
 import pytest
 
+from conftest import isolate_home
+
 from mcp_atlassian_cli.discovery import ToolParam, ToolSpec
-from mcp_atlassian_cli.main import main
+from mcp_atlassian_cli.main import _harden_stdout, main
 from mcp_atlassian_cli.runner import ToolRunner
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -59,7 +61,7 @@ def hermetic_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     HOME is pointed at an empty tmp_path so a developer's real
     ``~/.config/atli/config.toml`` can never leak into a test.
     """
-    monkeypatch.setenv("HOME", str(tmp_path))
+    isolate_home(monkeypatch, tmp_path)
     monkeypatch.delenv("ATLI_CONFIG", raising=False)
     monkeypatch.delenv("ATLI_PROFILE", raising=False)
     before = {
@@ -713,7 +715,7 @@ def test_prime_never_imports_mcp_atlassian(tmp_path: Path) -> None:
         if key not in ("ATLI_CONFIG", "ATLI_PROFILE", "ATLI_PRIME")
         and not key.startswith(("JIRA_", "CONFLUENCE_", "MCP_ATLASSIAN_"))
     }
-    env.update(PRIME_JIRA_ENV, HOME=str(tmp_path))
+    env.update(PRIME_JIRA_ENV, HOME=str(tmp_path), USERPROFILE=str(tmp_path))
     proc = subprocess.run(
         [sys.executable, str(script)],
         capture_output=True,
@@ -724,3 +726,134 @@ def test_prime_never_imports_mcp_atlassian(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr
     assert "prime imported the server" not in proc.stderr
     assert '"hookEventName":"SessionStart"' in proc.stdout
+
+
+def test_main_non_ascii_credential_exits_2_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A token that HTTP headers cannot carry fails fast, naming the variable.
+
+    The runner factory must never run: validation precedes the provider
+    import, so the broken value never reaches mcp_atlassian's clients (#10).
+    """
+    monkeypatch.setenv("CONFLUENCE_PERSONAL_TOKEN", "пароль")
+
+    def forbidden() -> ToolRunner:
+        raise AssertionError("runner built despite invalid credentials")
+
+    code = main(["confluence", "search", "--query", "x"], runner_factory=forbidden)
+    out, err = capsys.readouterr()
+    assert code == 2
+    assert out == ""
+    assert "CONFLUENCE_PERSONAL_TOKEN" in err
+    assert "latin-1" in err
+    # The secret itself must not be echoed back in full.
+    assert "пароль" not in err
+
+
+def test_main_profile_token_is_validated_after_application(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Profile-sourced values pass through the same check once applied."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".atli.toml").write_text(
+        'default_profile = "wiki"\n\n'
+        '[profiles.wiki]\n'
+        'CONFLUENCE_URL = "https://wiki.internal"\n'
+        'CONFLUENCE_PERSONAL_TOKEN = "пароль"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("ATLI_CONFIG", raising=False)
+
+    def forbidden() -> ToolRunner:
+        raise AssertionError("runner built despite invalid credentials")
+
+    code = main(["confluence", "search", "--query", "x"], runner_factory=forbidden)
+    out, err = capsys.readouterr()
+    assert code == 2
+    assert "CONFLUENCE_PERSONAL_TOKEN" in err
+
+
+def test_main_prime_skips_credential_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """prime never touches credentials, so a broken ambient token can't
+    break SessionStart hooks."""
+    monkeypatch.setenv("CONFLUENCE_PERSONAL_TOKEN", "пароль")
+    monkeypatch.delenv("ATLI_PRIME", raising=False)
+
+    assert main(["prime", "--hook-json"]) == 0
+
+
+class _RecordingStream:
+    """Minimal stdout stand-in that records its reconfigure() calls and
+    collects writes, so main() can run end-to-end against it."""
+
+    def __init__(self) -> None:
+        self.kwargs: dict[str, str] | None = None
+        self.written: list[str] = []
+
+    def write(self, text: str) -> int:
+        self.written.append(text)
+        return len(text)
+
+    def flush(self) -> None:
+        pass
+
+    def reconfigure(self, **kwargs: str) -> None:
+        self.kwargs = kwargs
+
+
+def test_harden_stdout_uses_backslashreplace(monkeypatch: pytest.MonkeyPatch) -> None:
+    stream = _RecordingStream()
+    monkeypatch.setattr(sys, "stdout", stream)
+    _harden_stdout()
+    assert stream.kwargs == {"errors": "backslashreplace"}
+
+
+def test_main_hardens_stdout_before_any_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reconfigure is wired into main(), not just defined: driving a
+    full dispatch must set backslashreplace on stdout before printing."""
+    stream = _RecordingStream()
+    monkeypatch.setattr(sys, "stdout", stream)
+    monkeypatch.delenv("ATLI_PRIME", raising=False)
+
+    code = main(["prime", "--hook-json"])
+
+    assert code == 0
+    assert stream.kwargs == {"errors": "backslashreplace"}
+    assert any("hookEventName" in chunk for chunk in stream.written)
+
+
+def test_harden_stdout_tolerates_unreconfigurable_streams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Streams without reconfigure (StringIO, a closed pipe) are left alone.
+    monkeypatch.setattr(sys, "stdout", object())
+    _harden_stdout()  # must not raise
+
+
+def test_harden_stdout_swallows_reconfigure_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Broken:
+        def reconfigure(self, **kwargs: str) -> None:
+            raise ValueError("cannot reconfigure")
+
+    monkeypatch.setattr(sys, "stdout", _Broken())
+    _harden_stdout()  # must not raise
+
+
+def test_harden_stdout_swallows_oserror_from_reconfigure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Broken:
+        def reconfigure(self, **kwargs: str) -> None:
+            raise OSError("stream is closing")
+
+    monkeypatch.setattr(sys, "stdout", _Broken())
+    _harden_stdout()  # must not raise

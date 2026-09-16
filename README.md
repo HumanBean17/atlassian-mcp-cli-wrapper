@@ -112,6 +112,14 @@ Notes:
   Cloud-only, and its basic auth used the app password that stopped working
   2026-06-09 — use `BITBUCKET_PERSONAL_TOKEN` there.
 - `*URL` may include `/wiki` for Confluence. The URL decides Cloud vs Data Center: hosts ending in `.atlassian.net` (also `.jira.com`, `.jira-dev.com`, `.atlassian.com`, and exact-match `api.atlassian.com`, plus the US-Gov domains) mean Cloud; everything else, including `localhost` and private IPs, means Data Center/Server.
+- Tokens and usernames are plain ASCII in practice. If one picks up
+  characters beyond latin-1 — Cyrillic letters, smart quotes, or mojibake
+  from a legacy-encoded file (a Windows classic) — every request dies with
+  `'latin-1' codec can't encode characters …`: HTTP headers cannot carry
+  such text. `atli` rejects such values up front (exit 2), naming the
+  variable and the first offending character. Set credentials with
+  `setx` / `$env:` (not by echoing files), keep `.atli.toml` saved as
+  UTF-8, and re-copy the token from its source when in doubt.
 
 ```console
 $ export JIRA_URL="https://your-company.atlassian.net"

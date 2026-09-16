@@ -22,6 +22,27 @@ from cyclopts.exceptions import (
 from mcp_atlassian_cli import config
 
 
+def _harden_stdout() -> None:
+    """Keep printing tool output from ever crashing on encoding.
+
+    On Windows a redirected stdout encodes with the ANSI code page (cp1251,
+    cp1252, ...), so a character outside it — an emoji in a Jira summary, CJK
+    text in a Confluence page — turns a plain ``print()`` into a
+    ``UnicodeEncodeError`` traceback (the output-side twin of the header
+    encoding failure in issue #10). ``backslashreplace`` degrades those
+    characters to ``\\uXXXX`` escapes instead: lossless to grep, harmless to
+    terminals. Consoles (PEP 528) and UTF-8 locales encode everything already
+    and are unaffected; a missing or non-reconfigurable stdout is left alone.
+    """
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is None:
+        return
+    try:
+        reconfigure(errors="backslashreplace")
+    except (ValueError, OSError):
+        pass
+
+
 def main(
     argv: list[str] | None = None,
     runner_factory: Callable[[], "ToolRunner"] | None = None,
@@ -37,6 +58,7 @@ def main(
     standard EPIPE idiom redirects stdout to ``os.devnull`` so the interpreter's
     shutdown flush has nowhere to complain, and 0 is returned.
     """
+    _harden_stdout()
     if argv is None:
         argv = sys.argv[1:]
 
@@ -86,6 +108,18 @@ def _run(
             code = error.code
             return code if isinstance(code, int) else 0
         return 0
+
+    # Credential hygiene must run before anything imports mcp_atlassian: the
+    # library freezes these values into its HTTP clients at import time, and a
+    # non-ASCII token would otherwise surface much later — and far less
+    # legibly — as a 'latin-1' codec error from inside http.client (#10).
+    # `prime` above is exempt: it never touches credentials or the network,
+    # and a SessionStart hook must not fail over ambient-env oddities.
+    try:
+        config.validate_credentials(os.environ)
+    except config.ConfigError as error:
+        print(error, file=sys.stderr)
+        return 2
 
     from mcp_atlassian_cli import providers
     from mcp_atlassian_cli.build import create_app
