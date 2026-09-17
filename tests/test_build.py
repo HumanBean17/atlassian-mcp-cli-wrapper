@@ -932,7 +932,10 @@ def test_init_app_dispatches_service(
 def test_init_app_bare_menu_chooses_service(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    script = [("ask", "3")] + _decline_script("bitbucket")
+    # Confluence, not bitbucket: menu routing is what is under test, and
+    # bitbucket would (correctly) hit the provider gate on the [atlassian]
+    # CI legs and exit 2 there.
+    script = [("ask", "2")] + _decline_script("confluence")
     app = create_init_app(
         {},
         home=tmp_path / "home",
@@ -945,7 +948,7 @@ def test_init_app_bare_menu_chooses_service(
         app(["init"], exit_on_error=False, print_error=False)
 
     assert excinfo.value.code == 0
-    assert "Service: bitbucket" in capsys.readouterr().out
+    assert "Service: confluence" in capsys.readouterr().out
 
 
 def test_init_app_exit_code_propagates(
