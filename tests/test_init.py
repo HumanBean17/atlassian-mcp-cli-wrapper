@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import stat
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -423,3 +425,79 @@ def test_render_summary_masks_credentials() -> None:
     assert "/tmp/x/.atli.toml" in summary
     assert "jira" in summary
     assert "project" in summary
+
+
+class StubRunner:
+    """Records call_tool invocations; optionally raises on every call."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self._error = error
+
+    def call_tool(self, name: str, args: dict[str, object]) -> str:
+        self.calls.append((name, dict(args)))
+        if self._error is not None:
+            raise self._error
+        return "ok"
+
+
+def test_verify_profile_applies_and_calls() -> None:
+    environ = {
+        "JIRA_API_TOKEN": "stale-token",
+        "CONFLUENCE_URL": "https://ambient.example.com/wiki",
+    }
+    values = {
+        "JIRA_URL": "https://work.atlassian.net",
+        "JIRA_USERNAME": "you@work.com",
+        "JIRA_API_TOKEN": "fresh-token",
+    }
+    stub = StubRunner()
+
+    init.verify_profile("jira", values, environ, runner_factory=lambda: stub)
+
+    assert stub.calls == [("search", {"jql": "ORDER BY created DESC", "limit": 1})]
+    assert environ["JIRA_API_TOKEN"] == "fresh-token"  # stale credential replaced
+    assert environ["CONFLUENCE_URL"] == "https://ambient.example.com/wiki"  # untouched prefix
+    assert environ["JIRA_URL"] == "https://work.atlassian.net"
+
+
+def test_verify_profile_failure_propagates() -> None:
+    from mcp_atlassian_cli.runner import ToolCallFailure
+
+    stub = StubRunner(error=ToolCallFailure("401 Unauthorized"))
+
+    with pytest.raises(ToolCallFailure, match="401"):
+        init.verify_profile(
+            "jira",
+            {"JIRA_URL": "https://x", "JIRA_PERSONAL_TOKEN": "t"},
+            {},
+            runner_factory=lambda: stub,
+        )
+
+
+def test_verify_profile_bitbucket_args() -> None:
+    stub = StubRunner()
+
+    init.verify_profile(
+        "bitbucket",
+        {"BITBUCKET_URL": "https://bitbucket.org", "BITBUCKET_USERNAME": "u", "BITBUCKET_API_TOKEN": "t"},
+        {},
+        runner_factory=lambda: stub,
+    )
+
+    assert stub.calls == [("list_repositories", {"max_results": 1})]
+
+
+def test_init_module_has_no_server_import_at_import_time() -> None:
+    """Importing the wizard module must never pull mcp_atlassian."""
+    code = (
+        "import mcp_atlassian_cli.init, sys; "
+        "sys.exit(0 if 'mcp_atlassian' not in sys.modules else 1)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parent.parent,
+    )
+    assert result.returncode == 0, result.stderr

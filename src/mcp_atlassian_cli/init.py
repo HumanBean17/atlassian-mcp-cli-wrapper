@@ -12,14 +12,19 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass, field
 from getpass import getpass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
-from mcp_atlassian_cli.config import CREDENTIAL_SUFFIXES, ConfigError, validate_credentials
+from mcp_atlassian_cli.config import (
+    CREDENTIAL_SUFFIXES,
+    ConfigError,
+    apply_profile,
+    validate_credentials,
+)
 
 
 @dataclass(frozen=True)
@@ -547,3 +552,30 @@ def render_summary(
     lines.append(f"Scope: {scope}")
     lines.append(f"hook: {harness if harness is not None else 'skipped'}")
     return "\n".join(lines)
+
+
+def verify_profile(
+    service: str,
+    values: Mapping[str, str],
+    environ: MutableMapping[str, str],
+    runner_factory: Callable[[], object] | None = None,
+) -> None:
+    """Prove the collected setup with one cheap read-only call.
+
+    Applies the profile to ``environ`` first — ``apply_profile``'s
+    per-prefix replacement gives the same stale-credential isolation a real
+    run gets — then pays the one-time mcp-atlassian import (skipped
+    entirely when ``runner_factory`` is injected) and fires the service's
+    verification call. Any result, including zero hits, proves URL +
+    credentials + TLS settings; auth/URL failures raise the runner's
+    exceptions for the caller's recovery menu.
+    """
+    spec = SERVICES[service]
+    apply_profile(values, environ)
+    if runner_factory is not None:
+        runner = runner_factory()
+    else:
+        from mcp_atlassian_cli.runner import ToolRunner
+
+        runner = ToolRunner()
+    runner.call_tool(spec.verify_tool, dict(spec.verify_args))
