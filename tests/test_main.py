@@ -857,3 +857,75 @@ def test_harden_stdout_swallows_oserror_from_reconfigure(
 
     monkeypatch.setattr(sys, "stdout", _Broken())
     _harden_stdout()  # must not raise
+
+
+def test_main_init_fast_path_beats_stub(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`init` dispatches via the fast path — create_app must never run."""
+    from mcp_atlassian_cli import build
+
+    def forbidden_create_app(*args: object, **kwargs: object) -> Any:
+        raise AssertionError("create_app must not be built for init")
+
+    received: list[list[str]] = []
+
+    class StubInitApp:
+        def __call__(self, argv: list[str], **kwargs: object) -> None:
+            received.append(list(argv))
+            raise SystemExit(0)
+
+    monkeypatch.setattr(build, "create_app", forbidden_create_app)
+    monkeypatch.setattr(build, "create_init_app", lambda *a, **kw: StubInitApp())
+
+    assert main(["init", "jira"]) == 0
+    assert received == [["init", "jira"]]
+
+
+def test_main_init_help_never_imports_server() -> None:
+    """`atli init --help` answers before any mcp_atlassian import."""
+    code = (
+        "from mcp_atlassian_cli.main import main; "
+        "import sys; "
+        "rc = main(['init', '--help']); "
+        "sys.exit(0 if 'mcp_atlassian' not in sys.modules else 1)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_main_init_bitbucket_provider_gate_exit_2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mcp_atlassian_cli import providers
+
+    monkeypatch.setattr(providers, "detect_provider", lambda: "atlassian")
+    monkeypatch.setattr(providers, "bitbucket_hint", lambda p: "install the fork provider")
+
+    assert main(["init", "bitbucket"]) == 2
+    assert "install the fork provider" in capsys.readouterr().out
+
+
+def test_main_init_keyboard_interrupt_exit_1(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from mcp_atlassian_cli import build
+
+    class InterruptingApp:
+        def __call__(self, argv: list[str], **kwargs: object) -> None:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(build, "create_init_app", lambda *a, **kw: InterruptingApp())
+
+    assert main(["init", "jira"]) == 1
+    assert "Aborted — nothing written." in capsys.readouterr().err
+
+
+def test_main_init_usage_error_exit_2(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["init", "bogus"]) == 2
+    assert capsys.readouterr().err.strip() != ""

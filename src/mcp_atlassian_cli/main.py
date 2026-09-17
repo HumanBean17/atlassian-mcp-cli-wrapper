@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Callable
+from pathlib import Path
 
 from cyclopts.exceptions import (
     CycloptsError,
@@ -104,6 +105,33 @@ def _run(
         except config.ConfigError as error:
             print(error, file=sys.stderr)
             return 2
+        except SystemExit as error:
+            code = error.code
+            return code if isinstance(code, int) else 0
+        return 0
+
+    # `init` is interactive onboarding and gets the same treatment: it
+    # starts before the mcp-atlassian import (the wizard pays that import
+    # lazily, only if it reaches the live-verification step) and is exempt
+    # from ambient credential validation — a broken ambient environment
+    # must not block re-onboarding; the wizard validates what it collects.
+    # KeyboardInterrupt is ours to own here: an interrupted wizard must
+    # die with a clean message, not a traceback mid-prompt.
+    if rest_argv[:1] == ["init"]:
+        from mcp_atlassian_cli.build import create_init_app
+
+        try:
+            app = create_init_app(os.environ, home=Path.home(), cwd=Path.cwd())
+            app(rest_argv, exit_on_error=False, print_error=False)
+        except CycloptsError as error:
+            print(error, file=sys.stderr)
+            return 2
+        except config.ConfigError as error:
+            print(error, file=sys.stderr)
+            return 2
+        except KeyboardInterrupt:
+            print("Aborted — nothing written.", file=sys.stderr)
+            return 1
         except SystemExit as error:
             code = error.code
             return code if isinstance(code, int) else 0
