@@ -14,7 +14,7 @@ from typing import Annotated, Any
 import cyclopts
 from cyclopts import Parameter
 
-from mcp_atlassian_cli import examples, expand, install as install_mod, prime
+from mcp_atlassian_cli import examples, expand, init as init_mod, install as install_mod, prime
 from mcp_atlassian_cli.config import ConfigError
 from mcp_atlassian_cli.discovery import ToolParam, ToolSpec, to_kebab
 
@@ -252,6 +252,80 @@ def _prime_stub() -> None:
     raise RuntimeError("prime must dispatch via the fast path, not the help stub")
 
 
+def _init_stub() -> None:
+    """Interactively configure a service and install the SessionStart hook.
+
+    Display-only, same contract as :func:`_prime_stub`: the real `init`
+    dispatches on main()'s fast path; this registration only puts the
+    command on root --help.
+    """
+    raise RuntimeError("init must dispatch via the fast path, not the help stub")
+
+
+def create_init_app(
+    environ: Mapping[str, str],
+    *,
+    home: Path,
+    cwd: Path,
+    runner_factory: Callable[[], object] | None = None,
+    prompt_factory: Callable[[], init_mod.Prompt] = init_mod.console_prompt,
+) -> cyclopts.App:
+    """The standalone ``atli init`` app for the main() fast path.
+
+    Mirrors :func:`create_prime_app`: built without tool specs so the
+    wizard starts instantly — the mcp-atlassian import is paid only inside
+    the verification step, by :func:`mcp_atlassian_cli.init.verify_profile`.
+    Each service command (and the bare menu) funnels into
+    :func:`mcp_atlassian_cli.init.run_init` and converts its exit code to
+    ``SystemExit``; main's fast-path handler maps that to the process code.
+    """
+
+    def run(service: str) -> None:
+        raise SystemExit(
+            init_mod.run_init(
+                service,
+                prompt=prompt_factory(),
+                home=home,
+                cwd=cwd,
+                environ=environ,
+                runner_factory=runner_factory,
+            )
+        )
+
+    def jira() -> None:
+        """Configure Jira: URL, credentials, verified profile, primer hook."""
+        run("jira")
+
+    def confluence() -> None:
+        """Configure Confluence: URL, credentials, verified profile, primer hook."""
+        run("confluence")
+
+    def bitbucket() -> None:
+        """Configure Bitbucket: URL, credentials, verified profile, primer hook."""
+        run("bitbucket")
+
+    def menu() -> None:
+        """Pick a service interactively, then run its wizard."""
+        run(init_mod.choose_service(prompt_factory()))
+
+    init_app = cyclopts.App(
+        name="init",
+        help="Configure a service interactively.",
+        **_NO_VERSION_FLAGS,
+    )
+    init_app.command(jira)
+    init_app.command(confluence)
+    init_app.command(bitbucket)
+    init_app.default(menu)
+    app = cyclopts.App(
+        name="atli",
+        help="atli init — interactive onboarding (URL, credentials, verified profile, SessionStart hook)",
+        **_NO_VERSION_FLAGS,
+    )
+    app.command(init_app)
+    return app
+
+
 def create_prime_app(
     environ: Mapping[str, str],
     profile_name: str | None,
@@ -332,8 +406,10 @@ def create_app(
     app = cyclopts.App(name="atli", help=_root_help(provider), **_NO_VERSION_FLAGS)
     app.command(_make_tools_command(specs, provider, environ or {}))
     app.command(_make_profiles_command(profiles_text))
-    # Display-only (see _prime_stub): real `prime` calls never reach this app.
+    # Display-only (see _prime_stub/_init_stub): real `prime`/`init` calls
+    # never reach this app.
     app.command(_prime_stub, name="prime")
+    app.command(_init_stub, name="init")
 
     unique: dict[tuple[str | None, str], ToolSpec] = {}
     for spec in specs:
