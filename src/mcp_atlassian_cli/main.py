@@ -132,6 +132,12 @@ def _run(
         except KeyboardInterrupt:
             print("Aborted — nothing written.", file=sys.stderr)
             return 1
+        except EOFError:
+            # Ctrl-D / exhausted stdin is the quiet twin of Ctrl-C for an
+            # input()-driven wizard (agents piping calls hit it immediately)
+            # — same clean abort, never a traceback.
+            print("Aborted — nothing written.", file=sys.stderr)
+            return 1
         except SystemExit as error:
             code = error.code
             return code if isinstance(code, int) else 0

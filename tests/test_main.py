@@ -881,12 +881,13 @@ def test_main_init_fast_path_beats_stub(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_main_init_help_never_imports_server() -> None:
-    """`atli init --help` answers before any mcp_atlassian import."""
+    """`atli init --help` answers before any mcp_atlassian import — and
+    actually renders help (exit 0, service names on stdout)."""
     code = (
         "from mcp_atlassian_cli.main import main; "
         "import sys; "
         "rc = main(['init', '--help']); "
-        "sys.exit(0 if 'mcp_atlassian' not in sys.modules else 1)"
+        "sys.exit(rc if 'mcp_atlassian' not in sys.modules else 1)"
     )
     result = subprocess.run(
         [sys.executable, "-c", code],
@@ -895,6 +896,7 @@ def test_main_init_help_never_imports_server() -> None:
         cwd=REPO_ROOT,
     )
     assert result.returncode == 0, result.stderr
+    assert "jira" in result.stdout
 
 
 def test_main_init_bitbucket_provider_gate_exit_2(
@@ -911,16 +913,45 @@ def test_main_init_bitbucket_provider_gate_exit_2(
     assert "install the fork provider" in capsys.readouterr().out
 
 
+class _BailingPrompt:
+    """A console prompt whose first question raises (Ctrl-C / Ctrl-D)."""
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+
+    def ask(self, prompt: str, *, default: str | None = None) -> str:
+        raise self._error
+
+    def ask_secret(self, prompt: str) -> str:
+        raise self._error
+
+
 def test_main_init_keyboard_interrupt_exit_1(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from mcp_atlassian_cli import build
+    """Ctrl-C at a wizard prompt must surface as the clean-abort contract.
+    Driven through the REAL cyclopts dispatch (create_init_app + the
+    suppress_keyboard_interrupt=False root flag) — a stub app would bypass
+    the very interception this test exists to pin (cyclopts defaults the
+    flag to True and converts Ctrl-C to SystemExit(130))."""
+    from mcp_atlassian_cli import init as init_mod
 
-    class InterruptingApp:
-        def __call__(self, argv: list[str], **kwargs: object) -> None:
-            raise KeyboardInterrupt
+    monkeypatch.setattr(
+        init_mod, "console_prompt", lambda: _BailingPrompt(KeyboardInterrupt())
+    )
 
-    monkeypatch.setattr(build, "create_init_app", lambda *a, **kw: InterruptingApp())
+    assert main(["init", "jira"]) == 1
+    assert "Aborted — nothing written." in capsys.readouterr().err
+
+
+def test_main_init_eof_exit_1(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Ctrl-D / exhausted stdin at a wizard prompt: same clean abort —
+    never a raw EOFError traceback (agents piping calls hit this first)."""
+    from mcp_atlassian_cli import init as init_mod
+
+    monkeypatch.setattr(init_mod, "console_prompt", lambda: _BailingPrompt(EOFError()))
 
     assert main(["init", "jira"]) == 1
     assert "Aborted — nothing written." in capsys.readouterr().err

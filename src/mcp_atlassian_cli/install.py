@@ -7,8 +7,8 @@ merge, never clobber — so one command onboards a machine or project.
 Harness support matrix (verified 2026-09): Claude Code, Codex (``hooks.json``,
 one-time ``/hooks`` trust review on first run), Qwen Code, and GigaCode (a
 Qwen fork: full parity with renamed paths) all inject SessionStart
-``additionalContext`` and are supported — the first three via the same JSON
-hook shape, so one merge routine serves them. Gemini CLI runs SessionStart
+``additionalContext`` and are supported — all four via the same JSON hook
+shape, so one merge routine serves them. Gemini CLI runs SessionStart
 hooks but does not inject their context (gemini-cli issue #15413) and stays
 unsupported; its registry entry carries the settings paths so enabling it
 later is a data change, not new code.

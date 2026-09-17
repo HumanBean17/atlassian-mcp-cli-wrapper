@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tomllib
 from tomllib import TOMLDecodeError
-from collections.abc import Callable, Mapping, MutableMapping
+from collections.abc import Callable, Collection, Mapping, MutableMapping
 from dataclasses import dataclass, field
 from getpass import getpass
 from pathlib import Path
@@ -85,7 +86,7 @@ SERVICES: dict[str, ServiceSpec] = {
             ),
         ),
         ssl_var="JIRA_SSL_VERIFY",
-        verify_tool="search",
+        verify_tool="jira_search",
         verify_args={"jql": "ORDER BY created DESC", "limit": 1},
     ),
     "confluence": ServiceSpec(
@@ -113,7 +114,7 @@ SERVICES: dict[str, ServiceSpec] = {
             ),
         ),
         ssl_var="CONFLUENCE_SSL_VERIFY",
-        verify_tool="search",
+        verify_tool="confluence_search",
         verify_args={"query": 'type = "page"', "limit": 1},
     ),
     "bitbucket": ServiceSpec(
@@ -141,7 +142,7 @@ SERVICES: dict[str, ServiceSpec] = {
             ),
         ),
         ssl_var="BITBUCKET_SSL_VERIFY",
-        verify_tool="list_repositories",
+        verify_tool="bitbucket_list_repositories",
         verify_args={"max_results": 1},
     ),
 }
@@ -160,32 +161,33 @@ def validate_url(text: str) -> str | None:
         return "URL is empty — enter the full address, e.g. https://your-company.atlassian.net"
     parts = urlsplit(text)
     if parts.scheme not in ("http", "https"):
+        if "://" in text:
+            return f"'{text}' needs an http:// or https:// scheme, not '{parts.scheme}://'."
         return f"'{text}' has no http:// or https:// scheme — include it, e.g. https://{text.lstrip('/')}"
     if not parts.hostname:
         return f"'{text}' has no host — use the full address, e.g. https://jira.example.com"
     return None
 
 
-_PROFILE_NAME_FORBIDDEN = set('[]".#\n\r\t')
+_PROFILE_NAME_OK = re.compile(r"[A-Za-z0-9_-]+")
 
 
 def validate_profile_name(name: str) -> str | None:
     """Return why ``name`` cannot head a ``[profiles.<name>]`` table, or None.
 
-    A dotted or bracketed name would silently nest TOML tables (or fail to
-    parse), so the character set is restricted to what a bare header key
-    tolerates; surrounding whitespace invites lookalike duplicates.
+    The name becomes a TOML bare header key, so it must be exactly the
+    character set tomllib accepts there — letters, digits, ``-``, ``_``.
+    Anything else (dots nest tables, spaces and quotes break the header,
+    non-ASCII varies by parser) would produce a file that does not parse.
     """
     if not name:
         return "Profile name is empty."
     if name != name.strip():
         return "Profile name has leading or trailing whitespace."
-    offending = sorted(set(name) & _PROFILE_NAME_FORBIDDEN)
-    if offending:
+    if _PROFILE_NAME_OK.fullmatch(name) is None:
         return (
-            "Profile name contains character(s) TOML table headers cannot "
-            f"carry: {' '.join(repr(c) for c in offending)}. Use letters, "
-            "digits, '-', and '_'."
+            "Profile name may only use letters, digits, '-', and '_' — "
+            f"'{name}' cannot head a [profiles.{name}] table."
         )
     return None
 
@@ -195,10 +197,12 @@ def toml_basic_string(value: str) -> str:
 
     Uses the JSON-compatible escape set, which is exactly the escape set a
     TOML basic string accepts for the characters that need escaping
-    (``\"``, ``\\\\``, control characters); everything else — including any
-    unicode — passes through raw.
+    (``\"``, ``\\\\``, control characters) — with one patch: DEL (U+007F)
+    is raw in JSON but rejected by tomllib inside a basic string, so it is
+    escaped explicitly. Everything else — including any unicode — passes
+    through raw.
     """
-    return json.dumps(value, ensure_ascii=False)
+    return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
 def mask(value: str) -> str:
@@ -220,16 +224,31 @@ def _assignment_line(line: str, key: str) -> bool:
     return stripped[len(key):].lstrip().startswith("=")
 
 
-def merge_profile_text(text: str, profile_name: str, values: Mapping[str, str]) -> str:
+def merge_profile_text(
+    text: str,
+    profile_name: str,
+    values: Mapping[str, str],
+    drop: Collection[str] = (),
+) -> str:
     """Merge ``values`` into the ``[profiles.<profile_name>]`` table of ``text``.
 
     Surgical by design — the same merge-never-clobber discipline the hook
     installer applies to harness settings: only the target section's key
     lines change (first occurrence of each key replaced wholesale, missing
     keys appended at section end); comments, key order, and every other
-    table survive byte-identical. Profiles are flat ``KEY = "value"``
-    tables by the config-file contract, so line surgery is exact. No
-    section yet: the table appends at EOF behind a blank separator.
+    table survive byte-identical. No section yet: the table appends at EOF
+    behind a blank separator. ``drop`` names wizard-owned keys whose
+    assignments are removed from the section first (every occurrence) —
+    re-running the wizard with different answers must not leave the
+    superseded answers behind (e.g. a TLS "verify" answer after a previous
+    "no", or Cloud credentials after a switch to a personal token).
+
+    Line surgery is exact for the config file atli reads and writes —
+    flat ``KEY = "value"`` tables — but it is still a line scan: a
+    hand-written multi-line string (``\"\"\"…\"\"\"``) or quoted key in the
+    target section is not understood (:func:`run_init`'s write-phase parse
+    guard turns any resulting surprise into a clean refusal, never a
+    corrupted file).
     """
     lines = text.splitlines(keepends=True)
     header = f"[profiles.{profile_name}]"
@@ -247,7 +266,7 @@ def merge_profile_text(text: str, profile_name: str, values: Mapping[str, str]) 
         merged = list(lines)
         if merged and not merged[-1].endswith("\n"):
             merged[-1] += "\n"
-        if merged:
+        if merged and not text.endswith("\n\n"):
             merged.append("\n")
         merged.append(header + "\n")
         merged.extend(rendered.values())
@@ -257,34 +276,41 @@ def merge_profile_text(text: str, profile_name: str, values: Mapping[str, str]) 
     while body_end < len(lines) and not _is_table_header(lines[body_end]):
         body_end += 1
 
-    updated = lines[: header_index + 1]
+    body: list[str] = []
     replaced: set[str] = set()
-    pending: list[str] = []
+    dropped: set[str] = set()
     for line in lines[header_index + 1 : body_end]:
         claimed = next(
             (key for key in rendered if key not in replaced and _assignment_line(line, key)),
             None,
         )
         if claimed is not None:
-            updated.append(rendered[claimed])
+            body.append(rendered[claimed])
             replaced.add(claimed)
-        else:
-            updated.append(line)
-    for key, line_text in rendered.items():
-        if key not in replaced:
-            pending.append(line_text)
-    updated.extend(pending)
-    updated.extend(lines[body_end:])
+            continue
+        obsolete = next(
+            (key for key in drop if key not in dropped and _assignment_line(line, key)),
+            None,
+        )
+        if obsolete is not None:
+            dropped.add(obsolete)
+            continue  # superseded wizard-owned key: the line goes away
+        body.append(line)
+    pending = [line_text for key, line_text in rendered.items() if key not in replaced]
+    if pending and body and not body[-1].endswith("\n"):
+        body[-1] += "\n"  # a hand-edited file may lack the final newline
+    updated = lines[: header_index + 1] + body + pending + lines[body_end:]
     return "".join(updated)
 
 
 def _matches_header(line: str, header: str) -> bool:
-    """True when ``line`` is the ``header`` table header (trailing spaces or
-    a trailing comment tolerated)."""
-    stripped = line.rstrip()
+    """True when ``line`` is the ``header`` table header — leading
+    indentation, trailing spaces, and a trailing comment tolerated, every
+    form tomllib accepts (a missed match would append a duplicate table)."""
+    stripped = line.strip()
     if stripped == header:
         return True
-    return stripped.startswith(header) and stripped[len(header):][:1] in (" ", "\t")
+    return stripped.startswith(header) and stripped[len(header):][:1] in (" ", "\t", "#")
 
 
 def ensure_default_profile(text: str, profile_name: str) -> str:
@@ -319,15 +345,19 @@ def ensure_default_profile(text: str, profile_name: str) -> str:
 def write_config(path: Path, content: str) -> None:
     """Atomically write ``content`` to ``path`` with owner-only permissions.
 
-    The sibling tmp file is chmod-ed BEFORE the rename, so the credentials
-    never exist on disk with group/other read bits — a crash mid-write can
-    only leave the pre-write file, never a partial or exposed one.
+    The tmp file is CREATED with mode 0600 (``os.open`` — umask can only
+    clear bits, never set them), so the credentials never exist on disk
+    with group/other read bits at any instant; the rename over the target
+    is atomic, so a crash mid-write can only leave the pre-write file,
+    never a partial or exposed one.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(path.name + ".tmp")
-    tmp_path.write_text(content, encoding="utf-8")
-    tmp_path.chmod(0o600)
+    descriptor = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(content)
     os.replace(tmp_path, path)
+    path.chmod(0o600)
 
 
 def config_target_path(
@@ -394,31 +424,40 @@ def console_prompt() -> Prompt:
 
 
 def collect_profile(
-    service: str, prompt: Prompt, out: Callable[[str], None] = print
+    service: str,
+    prompt: Prompt,
+    out: Callable[[str], None] = print,
+    *,
+    keep_url: str | None = None,
 ) -> dict[str, str]:
     """Wizard steps 1-3: URL, auth method + its variables, TLS choice.
 
-    Every answer is validated where it is entered — URL shape, non-empty
-    credentials, latin-1-safe secrets (the same rule
-    :func:`mcp_atlassian_cli.config.validate_credentials` enforces at
-    runtime) — so a bad value re-prompts immediately with the reason
-    instead of surfacing as an HTTP error on first use.
+    ``keep_url`` skips the URL prompt (a credentials-only retry keeps the
+    URL the user already entered). Every answer is validated where it is
+    entered — URL shape, non-empty credentials, latin-1-safe header values
+    (:func:`mcp_atlassian_cli.config.validate_credentials` is the same rule
+    runtime enforces) — so a bad value re-prompts immediately with the
+    reason instead of surfacing as an HTTP error on first use.
     """
     spec = SERVICES[service]
     values: dict[str, str] = {}
 
-    url_prompt = f"{service.title()} URL"
-    if spec.url_hint:
-        url_prompt += f" ({spec.url_hint})"
-    while True:
-        answer = prompt.ask(url_prompt, default=spec.url_default)
-        if spec.url_default is not None and answer == "":
-            answer = spec.url_default
-        error = validate_url(answer)
-        if error is None:
-            values[spec.url_var] = answer
-            break
-        out(error)
+    if keep_url is not None:
+        values[spec.url_var] = keep_url
+    else:
+        url_prompt = f"{service.title()} URL"
+        if spec.url_hint:
+            url_prompt += f" ({spec.url_hint})"
+        while True:
+            answer = prompt.ask(url_prompt, default=spec.url_default)
+            if spec.url_default is not None and answer == "":
+                answer = spec.url_default
+            answer = answer.strip()  # a pasted trailing space is a classic
+            error = validate_url(answer)
+            if error is None:
+                values[spec.url_var] = answer
+                break
+            out(error)
 
     menu = "\n".join(
         f"{number}) {method.label}"
@@ -429,7 +468,8 @@ def collect_profile(
         choice = prompt.ask(f"Auth method\n{menu}")
         if choice == "":
             choice = "1"
-        if choice.isdigit() and 1 <= int(choice) <= len(spec.auth_methods):
+        # isdecimal, not isdigit: "²".isdigit() is True but int() rejects it
+        if choice.isdecimal() and 1 <= int(choice) <= len(spec.auth_methods):
             method = spec.auth_methods[int(choice) - 1]
             break
         out(f"Choose 1-{len(spec.auth_methods)} (or press Enter for 1).")
@@ -443,12 +483,14 @@ def collect_profile(
             if not answer:
                 out("Value is required.")
                 continue
-            if variable.secret:
-                try:
-                    validate_credentials({variable.env_name: answer})
-                except ConfigError as error:
-                    out(str(error))
-                    continue
+            # Every collected value is header-bound (Basic-auth usernames
+            # included), so every value gets the latin-1 entry check — the
+            # cryptic http.client failure must never survive the prompt.
+            try:
+                validate_credentials({variable.env_name: answer})
+            except ConfigError as error:
+                out(str(error))
+                continue
             values[variable.env_name] = answer
             break
 
@@ -519,7 +561,7 @@ def choose_harness(
             return default.name
         if answer.lower() == "s":
             return None
-        if answer.isdigit() and 1 <= int(answer) <= len(supported):
+        if answer.isdecimal() and 1 <= int(answer) <= len(supported):
             return supported[int(answer) - 1].name
         out(f"Choose 1-{len(supported)} or s.")
 
@@ -530,7 +572,7 @@ def choose_service(prompt: Prompt, out: Callable[[str], None] = print) -> str:
     menu = "\n".join(f"{n}) {name}" for n, name in enumerate(names, start=1))
     while True:
         answer = prompt.ask(f"Which service?\n{menu}")
-        if answer.isdigit() and 1 <= int(answer) <= len(names):
+        if answer.isdecimal() and 1 <= int(answer) <= len(names):
             return names[int(answer) - 1]
         out(f"Choose 1-{len(names)}.")
 
@@ -554,6 +596,7 @@ def render_summary(
     lines.append(f"Profile: {profile_name}")
     lines.append(f"Scope: {scope}")
     lines.append(f"hook: {harness if harness is not None else 'skipped'}")
+    lines.append("Next: verify with one live read-only call, then write.")
     return "\n".join(lines)
 
 
@@ -619,8 +662,18 @@ def run_init(
         return 2
 
     spec = SERVICES[service]
+    # Every key the wizard can ever own for this service: the URL, all auth
+    # methods' variables, and the TLS toggle. Keys NOT in this run's values
+    # are dropped from the target section at merge time, so re-running init
+    # with different answers never leaves superseded state behind (a stale
+    # SSL_VERIFY="false" would silently downgrade TLS; old Cloud
+    # credentials would ride next to a new personal token).
+    owned_keys = {spec.url_var, spec.ssl_var} | {
+        variable.env_name for method in spec.auth_methods for variable in method.variables
+    }
+    keep_url: str | None = None
     while True:
-        values = collect_profile(service, prompt, out)
+        values = collect_profile(service, prompt, out, keep_url=keep_url)
         scope = choose_scope(prompt, out)
         if scope == "project":
             out(
@@ -634,6 +687,12 @@ def run_init(
         except ConfigError as error:
             out(str(error))
             return 2
+        if scope == "project" and environ.get("ATLI_CONFIG"):
+            out(
+                f"Note: $ATLI_CONFIG ({environ['ATLI_CONFIG']}) is set — at "
+                "runtime it outranks ./.atli.toml, so this profile will not "
+                "be the one atli loads unless you unset it."
+            )
         out(
             render_summary(
                 service,
@@ -658,10 +717,14 @@ def run_init(
             out(str(error))
             while True:
                 answer = prompt.ask(
-                    "1) Re-enter URL and credentials  2) Change URL  3) Abort"
+                    "1) Re-enter credentials (same URL)  2) Change URL  3) Abort"
                 )
-                if answer in ("1", "2"):
-                    break  # both resume at the URL prompt; intent differs, path does not
+                if answer == "1":
+                    keep_url = values[spec.url_var]
+                    break
+                if answer == "2":
+                    keep_url = None
+                    break
                 if answer == "3":
                     return 1
                 out("Choose 1, 2, or 3.")
@@ -679,9 +742,40 @@ def run_init(
         previous_default = tomllib.loads(existing).get("default_profile") if existing else None
     except TOMLDecodeError:
         previous_default = None
+    superseded = owned_keys - set(values)
     merged = ensure_default_profile(
-        merge_profile_text(existing, profile_name, values), profile_name
+        merge_profile_text(existing, profile_name, values, drop=superseded),
+        profile_name,
     )
+    # Parse guard: this layer's whole contract is "never corrupt the
+    # user's file", so the merged text is proven to parse AND to carry
+    # exactly what this run collected before a single byte is written —
+    # a surgery regression becomes a clean refusal, never a broken config.
+    try:
+        written_profile = tomllib.loads(merged)["profiles"][profile_name]
+    except (TOMLDecodeError, KeyError) as error:
+        out(
+            str(
+                ConfigError(
+                    f"Refusing to write '{config_path}': the merged profile "
+                    f"does not parse ({error!r}). Your file is unchanged — "
+                    "please report this as an atli bug."
+                )
+            )
+        )
+        return 2
+    expected = dict(values)
+    if any(written_profile.get(key) != value for key, value in expected.items()):
+        out(
+            str(
+                ConfigError(
+                    f"Refusing to write '{config_path}': the merged profile "
+                    "does not carry exactly the collected values. Your file "
+                    "is unchanged — please report this as an atli bug."
+                )
+            )
+        )
+        return 2
     write_config(config_path, merged)
     out(f"config: {config_path} (profile '{profile_name}', chmod 600)")
     if isinstance(previous_default, str) and previous_default != profile_name:

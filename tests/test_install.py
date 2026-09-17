@@ -184,6 +184,8 @@ def test_run_install_unknown_harness_names_everything(tmp_path: Path) -> None:
     assert "claude" in str(excinfo.value)
     assert "gemini" in str(excinfo.value)
     assert "codex" in str(excinfo.value)
+    assert "qwen" in str(excinfo.value)
+    assert "gigacode" in str(excinfo.value)
 
 
 def test_install_project_scope_writes_cwd(tmp_path: Path) -> None:

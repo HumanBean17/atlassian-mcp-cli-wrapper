@@ -95,11 +95,17 @@ Per service, in order:
 4. **Scope** — project vs global, default **global** (credentials inside a
    repo risk accidental commits). Choosing project prints "add `.atli.toml`
    to `.gitignore`" advice — advice only.
-5. **Profile name** — default is the service name. An existing profile of
-   that name in the target file is always **merged**: collected keys are
-   updated, unrelated keys (e.g. `TOOLSETS`) preserved. `default_profile` is
-   set to this name only if the key is absent; an existing different default
-   is never silently changed, and the summary says which default is active.
+5. **Profile name** — default is the service name (validated as a TOML
+   bare key: letters, digits, `-`, `_`). An existing profile of that name in
+   the target file is always **merged**: collected keys are updated,
+   unrelated keys (e.g. `TOOLSETS`) preserved, and wizard-owned keys this
+   run did NOT collect are dropped from the section — re-running with
+   different answers must not leave superseded state behind (a stale
+   `SSL_VERIFY = "false"` would silently downgrade TLS; old Cloud
+   credentials would ride next to a new personal token).
+   `default_profile` is set to this name only if the key is absent; an
+   existing different default is never silently changed, and the summary
+   says which default is active.
 6. **Harness** — numbered menu: claude / codex / qwen / gigacode / skip.
    Entries whose config dir (`.claude`, `.codex`, `.qwen`, `.gigacode`)
    exists under `~` are marked "detected"; the default is the first detected
@@ -116,7 +122,7 @@ Per service, in order:
   `user` (home-level settings).
 - `$ATLI_CONFIG`, when set, is what runtime reads: global scope writes
   **that** path (surfacing the existing set-but-missing error as exit 2
-  beforehand); project scope still writes `./.atli.toml` but the summary
+  beforehand); project scope still writes `./.atli.toml` but the wizard
   warns that runtime lookup prefers `$ATLI_CONFIG`.
 
 ## Verification before writing
@@ -127,11 +133,16 @@ and OAuth cleanup included; the process is short-lived, so an aborted run's
 dirty env is irrelevant), then imports `runner.ToolRunner` lazily and fires
 one cheap read-only call:
 
-| Service | Tool call |
+| Service | Tool call (as registered on the server: flat-prefixed) |
 |---|---|
-| jira | `search` with `jql = "ORDER BY created DESC"`, `limit = 1` |
-| confluence | `search` with `query = 'type = "page"'` (CQL), `limit = 1` |
-| bitbucket | `list_repositories` with `max_results = 1` (other params optional) |
+| jira | `jira_search` with `jql = "ORDER BY created DESC"`, `limit = 1` |
+| confluence | `confluence_search` with `query = 'type = "page"'` (CQL), `limit = 1` |
+| bitbucket | `bitbucket_list_repositories` with `max_results = 1` (other params optional) |
+
+  Tool names carry the service prefix (`jira_search`, not the underlying
+  Python function's bare `search`) — the MCP surface is flat-prefixed, the
+  same fact `discovery.split_service` exists for. A regression test drives
+  `verify_profile` through the prefix-mounted conftest stub server.
 
 Success (even zero results) proves URL + credentials + TLS settings and
 proceeds to the write phase. `ToolCallFailure` / `ToolRunnerError` prints the
@@ -190,7 +201,9 @@ resolve to installs instead of silence or the unsupported note.
 | Collected credential fails latin-1 check | re-prompt with the `validate_credentials`-style explanation |
 | Live verification fails | server message + menu: re-enter / change URL / abort (exit 1, nothing written) |
 | Abort (decline at confirm, or menu-abort) | "nothing written", exit 1 after failed verification; exit 0 when declined at the confirmation step before any failure |
-| Ctrl-C at any prompt | clean "aborted — nothing written" message, exit 1 (traceback suppressed) |
+| Ctrl-C at any prompt | clean "aborted — nothing written" message, exit 1 (traceback suppressed; `create_init_app` builds its root app with `suppress_keyboard_interrupt=False` so cyclopts does not convert Ctrl-C to `SystemExit(130)` first) |
+| Ctrl-D / exhausted stdin at any prompt | same clean "aborted — nothing written" message, exit 1 — never an `EOFError` traceback |
+| Surgery regression in the write phase | the merged text is parse-checked (`tomllib`) and compared against the collected values before writing; a mismatch is a clean refusal (exit 2), file untouched |
 | Target config unparsable as text / IO error | exit 2 with the `ConfigError` message, nothing written |
 | `$ATLI_CONFIG` set but missing (global scope) | exit 2, the existing `find_config_file` error text |
 

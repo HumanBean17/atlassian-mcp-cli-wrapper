@@ -268,7 +268,7 @@ def create_init_app(
     home: Path,
     cwd: Path,
     runner_factory: Callable[[], object] | None = None,
-    prompt_factory: Callable[[], init_mod.Prompt] = init_mod.console_prompt,
+    prompt_factory: Callable[[], init_mod.Prompt] | None = None,
 ) -> cyclopts.App:
     """The standalone ``atli init`` app for the main() fast path.
 
@@ -278,13 +278,20 @@ def create_init_app(
     Each service command (and the bare menu) funnels into
     :func:`mcp_atlassian_cli.init.run_init` and converts its exit code to
     ``SystemExit``; main's fast-path handler maps that to the process code.
+
+    ``suppress_keyboard_interrupt=False`` on the ROOT app (cyclopts
+    defaults it to True, which would swallow a wizard Ctrl-C into
+    ``SystemExit(130)`` before main's KeyboardInterrupt handler — the
+    clean-abort contract — could see it). ``prompt_factory`` resolves at
+    call time so tests can monkeypatch ``init.console_prompt``.
     """
 
     def run(service: str) -> None:
+        factory = prompt_factory or init_mod.console_prompt
         raise SystemExit(
             init_mod.run_init(
                 service,
-                prompt=prompt_factory(),
+                prompt=factory(),
                 home=home,
                 cwd=cwd,
                 environ=environ,
@@ -306,7 +313,8 @@ def create_init_app(
 
     def menu() -> None:
         """Pick a service interactively, then run its wizard."""
-        run(init_mod.choose_service(prompt_factory()))
+        factory = prompt_factory or init_mod.console_prompt
+        run(init_mod.choose_service(factory()))
 
     init_app = cyclopts.App(
         name="init",
@@ -320,6 +328,7 @@ def create_init_app(
     app = cyclopts.App(
         name="atli",
         help="atli init — interactive onboarding (URL, credentials, verified profile, SessionStart hook)",
+        suppress_keyboard_interrupt=False,
         **_NO_VERSION_FLAGS,
     )
     app.command(init_app)

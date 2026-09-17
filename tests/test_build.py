@@ -891,7 +891,7 @@ def test_root_help_lists_init(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as excinfo:
         app(["--help"], exit_on_error=True)
     assert excinfo.value.code in (None, 0)
-    assert "init" in capsys.readouterr().out
+    assert "Interactively configure" in capsys.readouterr().out
 
 
 def _decline_script(service: str) -> list[tuple[str, str]]:

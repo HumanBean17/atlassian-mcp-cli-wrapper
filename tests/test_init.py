@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -53,7 +54,7 @@ def test_validate_url_rejects() -> None:
 def test_validate_profile_name() -> None:
     for good in ("work", "dc-2", "Work_Prod"):
         assert validate_profile_name(good) is None
-    for bad in ("a.b", "[x]", 'a"b', "a#b", " work", "work ", "", "a\nb"):
+    for bad in ("a.b", "[x]", 'a"b', "a#b", " work", "work ", "", "a\nb", "my work", "работа"):
         assert validate_profile_name(bad) is not None
 
 
@@ -65,6 +66,7 @@ def test_toml_basic_string_roundtrip() -> None:
 def test_toml_basic_string_handles_unicode_and_controls() -> None:
     assert roundtrip("uni→code") == "uni→code"
     assert roundtrip("ctl\x01") == "ctl\x01"
+    assert roundtrip("del\x7f") == "del\x7f"  # raw DEL is illegal in TOML
 
 
 def test_mask_is_fixed_length() -> None:
@@ -82,17 +84,22 @@ def test_services_table_shape() -> None:
     assert [v.env_name for v in dc.variables] == ["JIRA_PERSONAL_TOKEN"]
     assert jira.ssl_var == "JIRA_SSL_VERIFY"
     assert (jira.verify_tool, jira.verify_args) == (
-        "search",
+        "jira_search",
         {"jql": "ORDER BY created DESC", "limit": 1},
     )
+    # The real server registers tools flat-prefixed (conftest stub mounts
+    # them the same way); a bare name here fails on every live verify.
+    for name, svc in SERVICES.items():
+        assert svc.verify_tool.startswith(f"{name}_"), svc.verify_tool
 
     confluence = SERVICES["confluence"]
     assert confluence.url_hint and "wiki" in confluence.url_hint
+    assert confluence.verify_tool == "confluence_search"
     assert confluence.verify_args == {"query": 'type = "page"', "limit": 1}
 
     bitbucket = SERVICES["bitbucket"]
     assert bitbucket.url_default == "https://bitbucket.org"
-    assert bitbucket.verify_tool == "list_repositories"
+    assert bitbucket.verify_tool == "bitbucket_list_repositories"
     assert bitbucket.verify_args == {"max_results": 1}
     cloud_bb = bitbucket.auth_methods[0]
     assert [v.env_name for v in cloud_bb.variables] == [
@@ -457,7 +464,7 @@ def test_verify_profile_applies_and_calls() -> None:
 
     init.verify_profile("jira", values, environ, runner_factory=lambda: stub)
 
-    assert stub.calls == [("search", {"jql": "ORDER BY created DESC", "limit": 1})]
+    assert stub.calls == [("jira_search", {"jql": "ORDER BY created DESC", "limit": 1})]
     assert environ["JIRA_API_TOKEN"] == "fresh-token"  # stale credential replaced
     assert environ["CONFLUENCE_URL"] == "https://ambient.example.com/wiki"  # untouched prefix
     assert environ["JIRA_URL"] == "https://work.atlassian.net"
@@ -487,7 +494,7 @@ def test_verify_profile_bitbucket_args() -> None:
         runner_factory=lambda: stub,
     )
 
-    assert stub.calls == [("list_repositories", {"max_results": 1})]
+    assert stub.calls == [("bitbucket_list_repositories", {"max_results": 1})]
 
 
 def test_init_module_has_no_server_import_at_import_time() -> None:
@@ -518,11 +525,12 @@ JIRA_CLOUD_SCRIPT = [
 ]
 
 
-def run_jira(script: list[tuple[str, str]], **kwargs: object) -> tuple[int, Recorder]:
+def run_jira(script: list[tuple[str, str]], **kwargs: object) -> tuple[int, Recorder, ScriptedPrompt]:
     out = Recorder()
+    prompt = ScriptedPrompt(script)
     code = init.run_init(
         "jira",
-        prompt=ScriptedPrompt(script),
+        prompt=prompt,
         home=kwargs.pop("home"),
         cwd=kwargs.pop("cwd"),
         environ=kwargs.pop("environ", {}),
@@ -530,13 +538,14 @@ def run_jira(script: list[tuple[str, str]], **kwargs: object) -> tuple[int, Reco
         out=out,
     )
     assert not kwargs, f"unused kwargs: {kwargs}"
-    return code, out
+    assert not prompt.script, f"script not fully consumed: {prompt.script}"
+    return code, out, prompt
 
 
 def test_run_init_happy_path_writes_and_reports(tmp_path: Path) -> None:
     home = tmp_path / "home"
 
-    code, out = run_jira(
+    code, out, _ = run_jira(
         list(JIRA_CLOUD_SCRIPT),
         home=home,
         cwd=tmp_path,
@@ -569,10 +578,11 @@ def test_run_init_merge_preserves_existing_profile_and_default(tmp_path: Path) -
     )
     config.write_text(seeded, encoding="utf-8")
 
-    code, _ = run_jira(list(JIRA_CLOUD_SCRIPT), home=home, cwd=tmp_path)
+    code, _, _ = run_jira(list(JIRA_CLOUD_SCRIPT), home=home, cwd=tmp_path)
 
     assert code == 0
     result = config.read_text(encoding="utf-8")
+    assert stat.S_IMODE(config.stat().st_mode) == 0o600  # tightened on overwrite
     assert "# hand-written" in result
     assert 'default_profile = "dc"' in result
     assert 'JIRA_URL = "https://dc.internal"' in result
@@ -589,7 +599,7 @@ def test_run_init_project_scope_and_skip_hook(tmp_path: Path) -> None:
     script[5] = ("ask", "2")  # scope: project
     script[7] = ("ask", "s")  # harness: skip
 
-    code, out = run_jira(script, home=home, cwd=project)
+    code, out, _ = run_jira(script, home=home, cwd=project)
 
     assert code == 0
     assert (project / ".atli.toml").is_file()
@@ -605,7 +615,7 @@ def test_run_init_decline_at_confirm(tmp_path: Path) -> None:
     script = list(JIRA_CLOUD_SCRIPT)
     script[8] = ("ask", "n")
 
-    code, out = run_jira(script, home=home, cwd=tmp_path)
+    code, out, _ = run_jira(script, home=home, cwd=tmp_path)
 
     assert code == 0
     assert out.lines[-1] == "Nothing written."
@@ -618,7 +628,7 @@ def test_run_init_verification_failure_abort(tmp_path: Path) -> None:
     home = tmp_path / "home"
     script = list(JIRA_CLOUD_SCRIPT) + [("ask", "3")]  # menu: abort
 
-    code, out = run_jira(
+    code, out, _ = run_jira(
         script,
         home=home,
         cwd=tmp_path,
@@ -627,6 +637,7 @@ def test_run_init_verification_failure_abort(tmp_path: Path) -> None:
 
     assert code == 1
     assert not (home / ".config").exists()
+    assert not (home / ".claude").exists()  # no hook either
     assert any("401" in line for line in out.lines)
 
 
@@ -660,7 +671,7 @@ def test_run_init_verification_retry_then_success(tmp_path: Path) -> None:
     ]
     factory = FlakyFactory()
 
-    code, _ = run_jira(script, home=home, cwd=tmp_path, runner_factory=factory)
+    code, _, _ = run_jira(script, home=home, cwd=tmp_path, runner_factory=factory)
 
     assert code == 0
     data = tomllib.loads(
@@ -695,7 +706,7 @@ def test_run_init_atli_config_respected(tmp_path: Path) -> None:
     explicit = tmp_path / "explicit.toml"
     explicit.write_text("", encoding="utf-8")
 
-    code, _ = run_jira(
+    code, _, _ = run_jira(
         list(JIRA_CLOUD_SCRIPT), home=home, cwd=tmp_path, environ={"ATLI_CONFIG": str(explicit)}
     )
 
@@ -711,9 +722,242 @@ def test_run_init_install_configerror_returns_2(tmp_path: Path) -> None:
     settings.parent.mkdir(parents=True)
     settings.write_text('{"broken":', encoding="utf-8")
 
-    code, out = run_jira(list(JIRA_CLOUD_SCRIPT), home=home, cwd=tmp_path)
+    code, out, _ = run_jira(list(JIRA_CLOUD_SCRIPT), home=home, cwd=tmp_path)
 
     assert code == 2
     config = home / ".config" / "atli" / "config.toml"
     assert config.is_file()  # config write happened before the hook failure
     assert any("not valid JSON" in line for line in out.lines)
+
+
+def test_verify_profile_against_prefix_mounted_server(stub_app: Any) -> None:
+    """The wizard must call the flat-prefixed tool names the real server
+    registers. The conftest stub mounts tools exactly as mcp-atlassian
+    does (``jira_search``), and ToolRunner is the real runner — a bare
+    ``search`` name fails here exactly as it would in production. A
+    name-agnostic StubRunner cannot catch this class of bug."""
+    from mcp_atlassian_cli.runner import ToolRunner
+
+    init.verify_profile(
+        "jira",
+        {
+            "JIRA_URL": "https://work.atlassian.net",
+            "JIRA_USERNAME": "you@work.com",
+            "JIRA_API_TOKEN": "tok",
+        },
+        {},
+        runner_factory=lambda: ToolRunner(app=stub_app),
+    )
+
+
+def test_merge_appends_into_section_without_trailing_newline() -> None:
+    """A hand-edited file whose target section ends at EOF with no final
+    newline must not get keys glued onto the last line (unparseable TOML)."""
+    text = '[profiles.work]\nJIRA_URL = "https://x.example.com"'
+
+    result = merge_profile_text(text, "work", {"JIRA_API_TOKEN": "tok"})
+
+    assert tomllib.loads(result)["profiles"]["work"] == {
+        "JIRA_URL": "https://x.example.com",
+        "JIRA_API_TOKEN": "tok",
+    }
+
+
+def test_merge_finds_indented_and_commented_headers() -> None:
+    """Indented headers and a trailing comment are valid TOML; missing
+    either would append a duplicate table and corrupt the file."""
+    for header_line in ("  [profiles.work]", "[profiles.work] # team profile"):
+        text = f'{header_line}\nOTHER = "kept"\n'
+        result = merge_profile_text(
+            text, "work", {"JIRA_URL": "https://x.example.com"}
+        )
+        data = tomllib.loads(result)
+        assert data["profiles"]["work"] == {
+            "OTHER": "kept",
+            "JIRA_URL": "https://x.example.com",
+        }
+        assert result.count("[profiles.work]") == 1  # no duplicate table
+
+
+def test_merge_drops_superseded_keys() -> None:
+    """Re-running the wizard with different answers must not leave the old
+    answers behind (a stale SSL_VERIFY=false would downgrade TLS; old
+    Cloud credentials would ride next to a personal token)."""
+    seeded = (
+        "[profiles.work]\n"
+        'JIRA_URL = "https://x.example.com"\n'
+        'JIRA_USERNAME = "you@x.com"\n'
+        'JIRA_API_TOKEN = "old"\n'
+        'JIRA_SSL_VERIFY = "false"\n'
+    )
+
+    result = merge_profile_text(
+        seeded,
+        "work",
+        {"JIRA_URL": "https://x.example.com", "JIRA_PERSONAL_TOKEN": "pat"},
+        drop={"JIRA_USERNAME", "JIRA_API_TOKEN", "JIRA_SSL_VERIFY"},
+    )
+
+    profile = tomllib.loads(result)["profiles"]["work"]
+    assert profile == {
+        "JIRA_URL": "https://x.example.com",
+        "JIRA_PERSONAL_TOKEN": "pat",
+    }
+
+
+def test_merge_eof_append_no_double_blank() -> None:
+    text = '[profiles.dc]\nK = "v"\n\n'
+
+    result = merge_profile_text(text, "work", {"JIRA_URL": "https://x"})
+
+    assert result == '[profiles.dc]\nK = "v"\n\n[profiles.work]\nJIRA_URL = "https://x"\n'
+
+
+def test_run_init_tls_flip_removes_stale_ssl_verify(tmp_path: Path) -> None:
+    """TLS n then y: the persisted profile must not keep verify=false —
+    that would silently downgrade TLS against the user's latest answer."""
+    home = tmp_path / "home"
+    config = home / ".config" / "atli" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        '[profiles.jira]\nJIRA_URL = "https://x"\nJIRA_SSL_VERIFY = "false"\n',
+        encoding="utf-8",
+    )
+
+    code, _, _ = run_jira(list(JIRA_CLOUD_SCRIPT), home=home, cwd=tmp_path)
+
+    assert code == 0
+    profile = tomllib.loads(config.read_text(encoding="utf-8"))["profiles"]["jira"]
+    assert "JIRA_SSL_VERIFY" not in profile
+
+
+def test_run_init_parse_guard_refuses_and_preserves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A surgery regression must become a clean refusal — never a written,
+    unparseable config (the file on disk is untouched)."""
+    home = tmp_path / "home"
+
+    def corrupt_merge(*args: object, **kwargs: object) -> str:
+        return 'this is not = valid toml'
+
+    monkeypatch.setattr(init, "merge_profile_text", corrupt_merge)
+    code, out, _ = run_jira(list(JIRA_CLOUD_SCRIPT), home=home, cwd=tmp_path)
+
+    assert code == 2
+    assert any("Refusing to write" in line for line in out.lines)
+    assert not (home / ".config" / "atli" / "config.toml").exists()
+
+
+def test_run_init_project_scope_warns_about_atli_config(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    explicit = tmp_path / "explicit.toml"
+    explicit.write_text("", encoding="utf-8")
+    script = list(JIRA_CLOUD_SCRIPT)
+    script[5] = ("ask", "2")  # scope: project
+
+    code, out, _ = run_jira(
+        script, home=home, cwd=tmp_path, environ={"ATLI_CONFIG": str(explicit)}
+    )
+
+    assert code == 0
+    assert (tmp_path / ".atli.toml").is_file()
+    assert any("ATLI_CONFIG" in line and "outranks" in line for line in out.lines)
+
+
+def test_run_init_atli_config_missing_exit_2(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    out = Recorder()
+
+    code = init.run_init(
+        "jira",
+        prompt=ScriptedPrompt(list(JIRA_CLOUD_SCRIPT)),
+        home=home,
+        cwd=tmp_path,
+        environ={"ATLI_CONFIG": str(tmp_path / "missing.toml")},
+        runner_factory=lambda: StubRunner(),
+        out=out,
+    )
+
+    assert code == 2
+    assert any("ATLI_CONFIG" in line for line in out.lines)
+    assert not (home / ".config").exists()
+
+
+def test_run_init_change_url_menu_restarts_at_url(tmp_path: Path) -> None:
+    """Menu option 2 (change URL) restarts at the URL prompt; option 1
+    keeps it. The two resume points are the spec's contract."""
+    from mcp_atlassian_cli.runner import ToolCallFailure
+
+    home = tmp_path / "home"
+    script = list(JIRA_CLOUD_SCRIPT) + [
+        ("ask", "2"),  # menu: change URL
+        ("ask", "https://fixed.atlassian.net"),  # URL re-asked
+        ("ask", "1"),
+        ("ask", "you@work.com"),
+        ("secret", "tok"),
+        ("ask", ""),
+        ("ask", ""),
+        ("ask", ""),
+        ("ask", "1"),
+        ("ask", ""),
+    ]
+
+    class FailOnceFactory:
+        def __init__(self) -> None:
+            self._failed = False
+
+        def __call__(self) -> StubRunner:
+            if self._failed:
+                return StubRunner()
+            self._failed = True
+            return StubRunner(error=ToolCallFailure("401"))
+
+    code, _, _ = run_jira(
+        script,
+        home=home,
+        cwd=tmp_path,
+        runner_factory=FailOnceFactory(),
+    )
+
+    assert code == 0
+    profile = tomllib.loads(
+        (home / ".config" / "atli" / "config.toml").read_text(encoding="utf-8")
+    )["profiles"]["jira"]
+    assert profile["JIRA_URL"] == "https://fixed.atlassian.net"
+
+
+def test_run_init_happy_path_never_echoes_secret(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+
+    code, out, _ = run_jira(list(JIRA_CLOUD_SCRIPT), home=home, cwd=tmp_path)
+
+    assert code == 0
+    assert all("tok-123" not in line for line in out.lines)
+
+
+def test_choose_harness_multiple_detected_pins_registry_order(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    for dir_name in (".qwen", ".claude", ".gigacode"):
+        (home / dir_name).mkdir(parents=True)
+
+    assert init.choose_harness(ScriptedPrompt([("ask", "")]), home) == "claude"
+
+
+def test_collect_profile_trims_url_and_rejects_exotic_digits() -> None:
+    out = Recorder()
+    prompt = ScriptedPrompt(
+        [
+            ("ask", "  https://work.atlassian.net  "),  # trimmed
+            ("ask", "²"),  # isdigit-True but int() rejects: re-prompt
+            ("ask", "1"),
+            ("ask", "фыва@work.com"),  # non-latin-1 username: re-prompt
+            ("ask", "you@work.com"),
+            ("secret", "tok"),
+            ("ask", ""),
+        ]
+    )
+
+    values = init.collect_profile("jira", prompt, out=out)
+
+    assert values["JIRA_URL"] == "https://work.atlassian.net"
+    assert values["JIRA_USERNAME"] == "you@work.com"
+    assert "latin-1" in "\n".join(out.lines)
