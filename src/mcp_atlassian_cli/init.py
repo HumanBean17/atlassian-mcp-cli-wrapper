@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import os
+import tomllib
+from tomllib import TOMLDecodeError
 from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass, field
 from getpass import getpass
@@ -19,6 +21,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
+from mcp_atlassian_cli import providers
 from mcp_atlassian_cli.config import (
     CREDENTIAL_SUFFIXES,
     ConfigError,
@@ -579,3 +582,126 @@ def verify_profile(
 
         runner = ToolRunner()
     runner.call_tool(spec.verify_tool, dict(spec.verify_args))
+
+
+_EXAMPLE_COMMAND: dict[str, str] = {
+    "jira": 'search --jql "assignee = currentUser()"',
+    "confluence": 'search --query "deploy"',
+    "bitbucket": "list-repositories",
+}
+
+
+def run_init(
+    service: str,
+    *,
+    prompt: Prompt,
+    home: Path,
+    cwd: Path,
+    environ: MutableMapping[str, str],
+    runner_factory: Callable[[], object] | None = None,
+    out: Callable[[str], None] = print,
+) -> int:
+    """The whole ``atli init <service>`` wizard; returns the process exit code.
+
+    Nothing touches disk until the live verification succeeds — a declined
+    confirm or an aborted recovery leaves the machine exactly as it was.
+    Exit codes: 0 success (a clean decline included); 1 verification
+    failure whose recovery was abandoned; 2 user-fixable configuration
+    problems (provider mismatch, unreadable config, broken harness
+    settings).
+    """
+    from mcp_atlassian_cli.install import install as install_hook
+    from mcp_atlassian_cli.runner import ToolCallFailure, ToolRunnerError
+
+    if service == "bitbucket" and providers.detect_provider() == "atlassian":
+        hint = providers.bitbucket_hint("atlassian")
+        out(hint or "This environment has the [atlassian] provider, which cannot mount Bitbucket tools.")
+        return 2
+
+    spec = SERVICES[service]
+    while True:
+        values = collect_profile(service, prompt, out)
+        scope = choose_scope(prompt, out)
+        if scope == "project":
+            out(
+                "Tip: add .atli.toml to your repository's .gitignore — "
+                "it holds plaintext credentials."
+            )
+        profile_name = choose_profile_name(service, prompt, out)
+        harness = choose_harness(prompt, home, out)
+        try:
+            config_path = config_target_path(scope, environ=environ, home=home, cwd=cwd)
+        except ConfigError as error:
+            out(str(error))
+            return 2
+        out(
+            render_summary(
+                service,
+                values,
+                config_path=config_path,
+                profile_name=profile_name,
+                harness=harness,
+                scope=scope,
+            )
+        )
+        while True:
+            proceed = prompt.ask("Proceed? [Y/n]", default="y").lower()
+            if proceed in ("", "y"):
+                break
+            if proceed == "n":
+                out("Nothing written.")
+                return 0
+            out("Please answer y or n.")
+        try:
+            verify_profile(service, values, environ, runner_factory=runner_factory)
+        except (ToolCallFailure, ToolRunnerError) as error:
+            out(str(error))
+            while True:
+                answer = prompt.ask(
+                    "1) Re-enter URL and credentials  2) Change URL  3) Abort"
+                )
+                if answer in ("1", "2"):
+                    break  # both resume at the URL prompt; intent differs, path does not
+                if answer == "3":
+                    return 1
+                out("Choose 1, 2, or 3.")
+            continue
+        break
+
+    try:
+        existing = (
+            config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+        )
+    except (OSError, UnicodeDecodeError) as error:
+        out(str(ConfigError(f"Could not read config file '{config_path}': {error}")))
+        return 2
+    try:
+        previous_default = tomllib.loads(existing).get("default_profile") if existing else None
+    except TOMLDecodeError:
+        previous_default = None
+    merged = ensure_default_profile(
+        merge_profile_text(existing, profile_name, values), profile_name
+    )
+    write_config(config_path, merged)
+    out(f"config: {config_path} (profile '{profile_name}', chmod 600)")
+    if isinstance(previous_default, str) and previous_default != profile_name:
+        out(f"default profile: '{previous_default}' (unchanged)")
+    if harness is not None:
+        try:
+            out(
+                install_hook(
+                    harness,
+                    "user" if scope == "global" else "project",
+                    home=home,
+                    cwd=cwd,
+                )
+            )
+        except ConfigError as error:
+            out(str(error))
+            return 2
+    else:
+        out("hook: skipped (install later with `atli prime --install`)")
+    out(f"{service}: {values.get(spec.url_var, '')}")
+    out(f"Try: atli {service} {_EXAMPLE_COMMAND[service]}")
+    out("Primer: atli prime")
+    return 0
