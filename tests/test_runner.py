@@ -351,3 +351,98 @@ def test_import_failure_missing_server_module(monkeypatch):
     assert "pip uninstall -y mcp-atlassian-with-bitbucket" in message
     assert "mcp-atlassian-cli[bitbucket]" in message
     assert "No module named 'mcp_atlassian.servers.main'" in message
+
+
+def _break_fastmcp_import(monkeypatch, reason: str = "simulated broken fastmcp") -> None:
+    """Make any ``fastmcp`` import raise — the post-switch failure mode where
+    ``fastmcp`` itself (a 2.x/3.x hybrid directory), not mcp_atlassian, is what
+    fails to import. This fires inside ``_client``/``call_tool`` BEFORE the
+    provider import in ``_app`` ever runs."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "fastmcp" or name.startswith("fastmcp."):
+            raise ImportError(reason)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+
+def test_fastmcp_import_failure_gets_install_guidance(monkeypatch):
+    """Issue #7 (still open): switching extras leaves BOTH providers and a
+    hybrid fastmcp directory; ``from fastmcp import Client`` fails inside
+    ``_client`` before ``self._app`` ever runs. The blanket handler must not
+    stamp that with the no-provider text — the environment-aware guidance
+    must fire on this path too."""
+    _fake_installed_dists(
+        monkeypatch,
+        {
+            "mcp-atlassian": "0.23.1",
+            "mcp-atlassian-with-bitbucket": "1.0.5",
+            "fastmcp": "2.14.7",
+            "fastmcp-slim": "3.4.7",
+        },
+    )
+    _break_fastmcp_import(
+        monkeypatch,
+        "cannot import name 'PrivateKeyJWTClientAuthenticator' "
+        "from 'fastmcp.server.auth.auth'",
+    )
+    with pytest.raises(ToolRunnerError) as excinfo:
+        ToolRunner().list_tool_specs()
+    message = str(excinfo.value)
+    assert "No mcp-atlassian server" not in message
+    assert (
+        "pip uninstall -y mcp-atlassian mcp-atlassian-with-bitbucket "
+        "fastmcp fastmcp-slim" in message
+    )
+    assert "PrivateKeyJWTClientAuthenticator" in message
+
+
+def test_fastmcp_import_failure_chimera_guidance(monkeypatch):
+    """Fork alone plus the fastmcp 2.x/slim hybrid: the two-step fastmcp
+    uninstall guidance must reach the user from the fastmcp-import path,
+    not just the provider-import path."""
+    _fake_installed_dists(
+        monkeypatch,
+        {
+            "mcp-atlassian-with-bitbucket": "1.0.5",
+            "fastmcp": "2.14.7",
+            "fastmcp-slim": "3.4.7",
+        },
+    )
+    _break_fastmcp_import(monkeypatch)
+    with pytest.raises(ToolRunnerError) as excinfo:
+        ToolRunner().list_tool_specs()
+    message = str(excinfo.value)
+    assert "pip uninstall -y fastmcp fastmcp-slim" in message
+    assert "No mcp-atlassian server" not in message
+
+
+def test_fastmcp_import_failure_routes_call_tool_too(monkeypatch):
+    """call_tool imports ToolError from fastmcp.exceptions before running;
+    that import must be diagnosed as well — same guidance as list_tool_specs."""
+    _fake_installed_dists(monkeypatch, {"mcp-atlassian-with-bitbucket": "1.0.5"})
+    _break_fastmcp_import(monkeypatch)
+    with pytest.raises(ToolRunnerError) as excinfo:
+        ToolRunner().call_tool("jira_get_issue", {"issue_key": "PROJ-1"})
+    message = str(excinfo.value)
+    assert "No mcp-atlassian server" not in message
+    assert "pip uninstall -y mcp-atlassian-with-bitbucket" in message
+    assert "simulated broken fastmcp" in message
+
+
+def test_fastmcp_import_failure_bare_env_names_both_extras(monkeypatch):
+    """No provider dist at all (bare CLI install, fastmcp missing with it):
+    the no-provider guidance remains the correct diagnosis there — it must
+    keep naming both extras and carry the underlying error."""
+    _fake_installed_dists(monkeypatch, {})
+    _break_fastmcp_import(monkeypatch)
+    with pytest.raises(ToolRunnerError) as excinfo:
+        ToolRunner().list_tool_specs()
+    message = str(excinfo.value)
+    assert "mcp-atlassian-cli[atlassian]" in message
+    assert "mcp-atlassian-cli[bitbucket]" in message
+    assert "cannot coexist" in message
