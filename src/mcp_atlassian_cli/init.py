@@ -11,8 +11,13 @@ tests script the conversation instead of driving a TTY.
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import urlsplit
+
+from mcp_atlassian_cli.config import ConfigError
 
 
 @dataclass(frozen=True)
@@ -189,3 +194,160 @@ def toml_basic_string(value: str) -> str:
 def mask(value: str) -> str:
     """A fixed-length mask; never echoes secret length back to the console."""
     return "****"
+
+
+def _is_table_header(line: str) -> bool:
+    """True when ``line`` opens a TOML table (``[x]``) or array of tables."""
+    return line.lstrip().startswith("[")
+
+
+def _assignment_line(line: str, key: str) -> bool:
+    """True when ``line`` assigns ``key`` (``KEY = "value"`` shape, tolerating
+    leading spaces and spaces around ``=``; an inline comment may follow)."""
+    stripped = line.strip()
+    if not stripped.startswith(key):
+        return False
+    return stripped[len(key):].lstrip().startswith("=")
+
+
+def merge_profile_text(text: str, profile_name: str, values: Mapping[str, str]) -> str:
+    """Merge ``values`` into the ``[profiles.<profile_name>]`` table of ``text``.
+
+    Surgical by design — the same merge-never-clobber discipline the hook
+    installer applies to harness settings: only the target section's key
+    lines change (first occurrence of each key replaced wholesale, missing
+    keys appended at section end); comments, key order, and every other
+    table survive byte-identical. Profiles are flat ``KEY = "value"``
+    tables by the config-file contract, so line surgery is exact. No
+    section yet: the table appends at EOF behind a blank separator.
+    """
+    lines = text.splitlines(keepends=True)
+    header = f"[profiles.{profile_name}]"
+    rendered = {key: f"{key} = {toml_basic_string(value)}\n" for key, value in values.items()}
+
+    header_index = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if _matches_header(line, header)
+        ),
+        None,
+    )
+    if header_index is None:
+        merged = list(lines)
+        if merged and not merged[-1].endswith("\n"):
+            merged[-1] += "\n"
+        if merged:
+            merged.append("\n")
+        merged.append(header + "\n")
+        merged.extend(rendered.values())
+        return "".join(merged)
+
+    body_end = header_index + 1
+    while body_end < len(lines) and not _is_table_header(lines[body_end]):
+        body_end += 1
+
+    updated = lines[: header_index + 1]
+    replaced: set[str] = set()
+    pending: list[str] = []
+    for line in lines[header_index + 1 : body_end]:
+        claimed = next(
+            (key for key in rendered if key not in replaced and _assignment_line(line, key)),
+            None,
+        )
+        if claimed is not None:
+            updated.append(rendered[claimed])
+            replaced.add(claimed)
+        else:
+            updated.append(line)
+    for key, line_text in rendered.items():
+        if key not in replaced:
+            pending.append(line_text)
+    updated.extend(pending)
+    updated.extend(lines[body_end:])
+    return "".join(updated)
+
+
+def _matches_header(line: str, header: str) -> bool:
+    """True when ``line`` is the ``header`` table header (trailing spaces or
+    a trailing comment tolerated)."""
+    stripped = line.rstrip()
+    if stripped == header:
+        return True
+    return stripped.startswith(header) and stripped[len(header):][:1] in (" ", "\t")
+
+
+def ensure_default_profile(text: str, profile_name: str) -> str:
+    """Set ``default_profile`` to ``profile_name`` unless one is already set.
+
+    The assignment inserts immediately before the first table header so it
+    stays top-level (a ``default_profile`` after a table header would belong
+    to that table); an existing assignment — any value — is never changed,
+    because silently re-pointing someone's default profile is exactly the
+    kind of surprise a merge must not cause.
+    """
+    lines = text.splitlines(keepends=True)
+    first_table = next(
+        (index for index, line in enumerate(lines) if _is_table_header(line)),
+        len(lines),
+    )
+    already_set = any(
+        _assignment_line(line, "default_profile") for line in lines[:first_table]
+    )
+    if already_set:
+        return text
+    assignment = f"default_profile = {toml_basic_string(profile_name)}\n"
+    if first_table == len(lines):
+        merged = list(lines)
+        if merged and not merged[-1].endswith("\n"):
+            merged[-1] += "\n"
+        merged.append(assignment)
+        return "".join(merged)
+    return "".join(lines[:first_table] + [assignment] + lines[first_table:])
+
+
+def write_config(path: Path, content: str) -> None:
+    """Atomically write ``content`` to ``path`` with owner-only permissions.
+
+    The sibling tmp file is chmod-ed BEFORE the rename, so the credentials
+    never exist on disk with group/other read bits — a crash mid-write can
+    only leave the pre-write file, never a partial or exposed one.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(path.name + ".tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    tmp_path.chmod(0o600)
+    os.replace(tmp_path, path)
+
+
+def config_target_path(
+    scope: str,
+    *,
+    environ: Mapping[str, str],
+    home: Path,
+    cwd: Path,
+) -> Path:
+    """The config file a scope writes: project → ``./.atli.toml`` beside the
+    repo, global → the machine file runtime reads.
+
+    Global honors ``$ATLI_CONFIG`` when it points at an existing file (init
+    must write what runtime loads); a set-but-missing path is the same
+    user-fixable error ``config.find_config_file`` raises — in production
+    ``main`` surfaces it before init ever runs, the check here covers direct
+    library use. No explicit override: ``~/.config/atli/config.toml``.
+    """
+    if scope == "project":
+        return cwd / ".atli.toml"
+    if scope == "global":
+        explicit = environ.get("ATLI_CONFIG")
+        if explicit:
+            path = Path(explicit)
+            if path.is_file():
+                return path
+            raise ConfigError(
+                f"ATLI_CONFIG is set to '{explicit}', but that file does not "
+                "exist. Point ATLI_CONFIG at an existing TOML config file, "
+                "or unset it."
+            )
+        return home / ".config" / "atli" / "config.toml"
+    raise ConfigError(f"Unknown scope '{scope}' — use 'project' or 'global'.")
