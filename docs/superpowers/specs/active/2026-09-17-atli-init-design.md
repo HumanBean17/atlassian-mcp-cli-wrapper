@@ -1,6 +1,6 @@
 # Interactive onboarding: `atli init <service>`
 
-**Status:** draft
+**Status:** in_progress
 
 ## Problem
 
