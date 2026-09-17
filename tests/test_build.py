@@ -16,7 +16,8 @@ from cyclopts.exceptions import (
     UnknownOptionError,
 )
 
-from mcp_atlassian_cli.build import create_app, create_prime_app
+from mcp_atlassian_cli.build import create_app, create_init_app, create_prime_app
+from test_init import ScriptedPrompt, StubRunner
 from mcp_atlassian_cli.config import ConfigError
 from mcp_atlassian_cli.discovery import ToolParam, ToolSpec
 
@@ -883,3 +884,100 @@ def test_prime_help_documents_flags(capsys: pytest.CaptureFixture[str]) -> None:
     out = capsys.readouterr().out
     assert "--hook-json" in out
     assert "--export" in out
+
+
+def test_root_help_lists_init(capsys: pytest.CaptureFixture[str]) -> None:
+    app = create_app([], dispatch=lambda name, args: "")
+    with pytest.raises(SystemExit) as excinfo:
+        app(["--help"], exit_on_error=True)
+    assert excinfo.value.code in (None, 0)
+    assert "Interactively configure" in capsys.readouterr().out
+
+
+def _decline_script(service: str) -> list[tuple[str, str]]:
+    """A full wizard pass that declines at the confirm prompt."""
+    url_answer = "" if service == "bitbucket" else f"https://{service}.example.com"
+    return [
+        ("ask", url_answer),
+        ("ask", "1"),
+        ("ask", "you@work.com"),
+        ("secret", "tok"),
+        ("ask", ""),  # TLS
+        ("ask", ""),  # scope: global
+        ("ask", ""),  # profile name default
+        ("ask", "1"),  # harness: claude
+        ("ask", "n"),  # decline
+    ]
+
+
+def test_init_app_dispatches_service(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    app = create_init_app(
+        {},
+        home=tmp_path / "home",
+        cwd=tmp_path,
+        runner_factory=lambda: StubRunner(),
+        prompt_factory=lambda: ScriptedPrompt(_decline_script("jira")),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        app(["init", "jira"], exit_on_error=False, print_error=False)
+
+    assert excinfo.value.code == 0
+    assert "Nothing written." in capsys.readouterr().out
+    assert not (tmp_path / "home").exists()
+
+
+def test_init_app_bare_menu_chooses_service(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Confluence, not bitbucket: menu routing is what is under test, and
+    # bitbucket would (correctly) hit the provider gate on the [atlassian]
+    # CI legs and exit 2 there.
+    script = [("ask", "2")] + _decline_script("confluence")
+    app = create_init_app(
+        {},
+        home=tmp_path / "home",
+        cwd=tmp_path,
+        runner_factory=lambda: StubRunner(),
+        prompt_factory=lambda: ScriptedPrompt(script),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        app(["init"], exit_on_error=False, print_error=False)
+
+    assert excinfo.value.code == 0
+    assert "Service: confluence" in capsys.readouterr().out
+
+
+def test_init_app_exit_code_propagates(
+    tmp_path: Path,
+) -> None:
+    from mcp_atlassian_cli.runner import ToolCallFailure
+
+    script = _decline_script("jira")
+    script[-1] = ("ask", "")  # confirm
+    script.append(("ask", "3"))  # verification failed -> abort
+    app = create_init_app(
+        {},
+        home=tmp_path / "home",
+        cwd=tmp_path,
+        runner_factory=lambda: StubRunner(error=ToolCallFailure("401")),
+        prompt_factory=lambda: ScriptedPrompt(script),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        app(["init", "jira"], exit_on_error=False, print_error=False)
+
+    assert excinfo.value.code == 1
+
+
+def test_init_help_documents_services(capsys: pytest.CaptureFixture[str]) -> None:
+    app = create_init_app({}, home=Path("/h"), cwd=Path("/c"))
+    with pytest.raises(SystemExit) as excinfo:
+        app(["init", "--help"], exit_on_error=True)
+    assert excinfo.value.code in (None, 0)
+    out = capsys.readouterr().out
+    for name in ("jira", "confluence", "bitbucket"):
+        assert name in out

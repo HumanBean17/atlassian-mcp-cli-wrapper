@@ -44,12 +44,12 @@ def stub_app() -> Any:
         return f"issue {issue_key} compact={compact}"
 
     @jira.tool
-    def search(jql: str, labels: list[str] | None = None) -> str:
+    def search(jql: str, labels: list[str] | None = None, limit: int = 5) -> str:
         """Search issues with JQL."""
         logging.getLogger("mcp_atlassian.utils.toolsets").warning(
             "TOOLSETS is not set — deprecation-style warning from the library."
         )
-        return f"search {jql} labels={labels}"
+        return f"search {jql} labels={labels} limit={limit}"
 
     @jira.tool
     def boom(message: str) -> str:
@@ -65,9 +65,9 @@ def stub_app() -> Any:
     confluence = FastMCP("confluence")
 
     @confluence.tool
-    def search(query: str) -> str:
+    def search(query: str, limit: int = 5) -> str:
         """Search Confluence pages."""
-        return f"found: {query}"
+        return f"found: {query} limit={limit}"
 
     app = FastMCP("stub")
     # Positional namespace: the keyword is `namespace=` on fastmcp 3.x but

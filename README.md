@@ -69,6 +69,39 @@ provider ships only via an extra — `mcp-atlassian>=0.23,<0.24` with
 with `[bitbucket]` (fastmcp 2.13–2.14). A base dependency cannot be
 suppressed by an extra marker, so the provider cannot also be a default.
 
+## Onboarding (`atli init`)
+
+One command takes you from install to a verified setup:
+
+```console
+$ atli init jira        # or confluence / bitbucket; bare `atli init` shows a menu
+```
+
+The wizard asks for the service URL, Cloud or Data Center/Server
+credentials (tokens are entered hidden and validated as you type), whether
+to verify TLS certificates (answer **n** behind a corporate proxy with a
+self-signed CA), where to store everything, the profile name, and which
+harness to prime:
+
+- **Scope** — `global` (default) writes `~/.config/atli/config.toml` plus
+  the home-level harness settings; `project` writes `./.atli.toml` plus the
+  repo-local settings. Add `.atli.toml` to your `.gitignore` — profiles are
+  plaintext credentials.
+- **Harnesses** — Claude Code (`.claude/settings.json`), Codex
+  (`.codex/hooks.json`; trust the hook via `/hooks` on first run), Qwen
+  Code (`.qwen/settings.json`), and GigaCode (`.gigacode/settings.json`).
+  The SessionStart hook merges idempotently — existing settings are never
+  clobbered.
+
+Before anything is written, the wizard verifies the setup with one cheap
+read-only call (a limit-1 search or repo list). On failure you re-enter or
+abort with nothing written. The profile merges into an existing config
+surgically — comments and other profiles survive byte-for-byte — and the
+file is `chmod 600` afterwards.
+
+Hand-written profiles (next section) remain the power-user path — that is
+where mTLS (`*_CLIENT_CERT`) and OAuth setups live.
+
 ## Authentication
 
 `atli` authenticates with the same environment variables as mcp-atlassian.
@@ -209,15 +242,18 @@ $ atli prime --install               # detect harnesses, user scope
 $ atli prime --install --scope project  # .claude/settings.json in the repo
 ```
 
-- **Claude Code** is supported (user or project scope).
-- **Gemini CLI** and **Codex** are detected but not auto-installed: Gemini
-  runs SessionStart hooks without injecting their context (gemini-cli
-  issue #15413); Codex hooks are experimental. `atli prime --hook-json`
-  output remains compatible with both if you wire them manually.
+- **Claude Code** (`.claude/settings.json`), **Codex** (`.codex/hooks.json`,
+  one-time `/hooks` trust review on first run), **Qwen Code**
+  (`.qwen/settings.json`), and **GigaCode** (`.gigacode/settings.json`) are
+  supported, in user or project scope — Codex's `hooks.json` uses the same
+  JSON hook shape as Claude Code's settings.
+- **Gemini CLI** is detected but not auto-installed: it runs SessionStart
+  hooks without injecting their context (gemini-cli issue #15413). The
+  `atli prime --hook-json` envelope remains compatible if you wire it by
+  hand.
 
-Manual Claude Code hook, if you prefer (same envelope as the installer
-writes; the `--hook-json` envelope is what Gemini CLI and Codex would need
-too, wired by hand until their hook support lands):
+Manual hook, if you prefer (same envelope as the installer writes for
+every supported harness; Gemini CLI would need it wired by hand):
 
 ```json
 {
@@ -233,7 +269,7 @@ too, wired by hand until their hook support lands):
 $ atli prime [--hook-json] [--export]
 ```
 
-Claude Code hook (same envelope serves Gemini CLI and Codex):
+SessionStart hook (the one envelope every supported harness consumes):
 
 ```json
 {

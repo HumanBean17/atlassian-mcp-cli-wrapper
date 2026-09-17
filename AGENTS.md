@@ -7,7 +7,8 @@
 - `atli bitbucket list-repositories` (`bitbucket_*` tools appear only when the fork provider is installed: `pip install "mcp-atlassian-cli[bitbucket]"`; the two providers cannot coexist)
 - Long values read files: `--content @page.md` (`-` = stdin when piped; `@@x` = literal `@x`).
 - Multi-instance: `atli --profile NAME <command>` (flag goes before the subcommand).
-- `atli prime [--hook-json]`: compact primer of this setup (configured services, profile, usage) for SessionStart hooks; `atli prime --install` writes the hook (Claude Code); override via `.atli/PRIME.md`.
+- `atli prime [--hook-json]`: compact primer of this setup (configured services, profile, usage) for SessionStart hooks; `atli prime --install` writes the hook (claude, codex, qwen, gigacode); override via `.atli/PRIME.md`.
+- `atli init <service>` (jira/confluence/bitbucket): interactive wizard — collects URL + credentials, verifies with a live call, writes a merged `chmod 600` profile (`./.atli.toml` or `~/.config/atli/config.toml`), and installs the SessionStart hook for the chosen harness.
 - Startup takes ~1 s warm, a few seconds cold (mcp-atlassian import dominates); the tool's markdown/JSON is printed verbatim to stdout.
 - Repeatable list flags repeat: `--read-users alice --read-users bob` on `confluence set-page-restrictions` (a comma inside one flag makes a single element).
 - Exit codes: 0 success, 1 tool/server failure, 2 usage or config error.

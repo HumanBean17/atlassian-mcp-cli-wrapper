@@ -1,0 +1,801 @@
+"""Interactive onboarding wizard (``atli init <service>``).
+
+Pure decision and I/O logic in the :mod:`mcp_atlassian_cli.prime`
+discipline: this module imports nothing that reaches the server stack —
+the single exception is the lazy ``ToolRunner`` import inside
+:func:`verify_profile`, which the wizard pays only at the live-verification
+step. All prompting goes through the injectable :class:`Prompt` protocol so
+tests script the conversation instead of driving a TTY.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import tomllib
+from tomllib import TOMLDecodeError
+from collections.abc import Callable, Collection, Mapping, MutableMapping
+from dataclasses import dataclass, field
+from getpass import getpass
+from pathlib import Path
+from typing import Protocol, runtime_checkable
+from urllib.parse import urlsplit
+
+from mcp_atlassian_cli import providers
+from mcp_atlassian_cli.config import (
+    CREDENTIAL_SUFFIXES,
+    ConfigError,
+    apply_profile,
+    validate_credentials,
+)
+
+
+@dataclass(frozen=True)
+class VarSpec:
+    """One environment variable the wizard collects for an auth method."""
+
+    env_name: str
+    secret: bool
+    prompt_label: str
+    """Human label shown at the prompt, env name included."""
+
+
+@dataclass(frozen=True)
+class AuthMethod:
+    """One selectable authentication shape for a service."""
+
+    label: str
+    variables: tuple[VarSpec, ...]
+
+
+@dataclass(frozen=True)
+class ServiceSpec:
+    """Everything the wizard needs to know about one service."""
+
+    name: str
+    url_var: str
+    url_default: str | None
+    url_hint: str | None
+    auth_methods: tuple[AuthMethod, ...]
+    ssl_var: str
+    verify_tool: str
+    verify_args: dict[str, object] = field(default_factory=dict)
+
+
+_CLOUD_LABEL = "Cloud — username (email) + API token"
+_DC_LABEL = "Data Center / Server — personal token"
+
+SERVICES: dict[str, ServiceSpec] = {
+    "jira": ServiceSpec(
+        name="jira",
+        url_var="JIRA_URL",
+        url_default=None,
+        url_hint=None,
+        auth_methods=(
+            AuthMethod(
+                label=_CLOUD_LABEL,
+                variables=(
+                    VarSpec("JIRA_USERNAME", False, "Email (JIRA_USERNAME)"),
+                    VarSpec("JIRA_API_TOKEN", True, "API token (JIRA_API_TOKEN)"),
+                ),
+            ),
+            AuthMethod(
+                label=_DC_LABEL,
+                variables=(VarSpec("JIRA_PERSONAL_TOKEN", True, "Personal token (JIRA_PERSONAL_TOKEN)"),),
+            ),
+        ),
+        ssl_var="JIRA_SSL_VERIFY",
+        verify_tool="jira_search",
+        verify_args={"jql": "ORDER BY created DESC", "limit": 1},
+    ),
+    "confluence": ServiceSpec(
+        name="confluence",
+        url_var="CONFLUENCE_URL",
+        url_default=None,
+        url_hint="Cloud URLs end with /wiki (https://your-company.atlassian.net/wiki)",
+        auth_methods=(
+            AuthMethod(
+                label=_CLOUD_LABEL,
+                variables=(
+                    VarSpec("CONFLUENCE_USERNAME", False, "Email (CONFLUENCE_USERNAME)"),
+                    VarSpec("CONFLUENCE_API_TOKEN", True, "API token (CONFLUENCE_API_TOKEN)"),
+                ),
+            ),
+            AuthMethod(
+                label=_DC_LABEL,
+                variables=(
+                    VarSpec(
+                        "CONFLUENCE_PERSONAL_TOKEN",
+                        True,
+                        "Personal token (CONFLUENCE_PERSONAL_TOKEN)",
+                    ),
+                ),
+            ),
+        ),
+        ssl_var="CONFLUENCE_SSL_VERIFY",
+        verify_tool="confluence_search",
+        verify_args={"query": 'type = "page"', "limit": 1},
+    ),
+    "bitbucket": ServiceSpec(
+        name="bitbucket",
+        url_var="BITBUCKET_URL",
+        url_default="https://bitbucket.org",
+        url_hint=None,
+        auth_methods=(
+            AuthMethod(
+                label=_CLOUD_LABEL,
+                variables=(
+                    VarSpec("BITBUCKET_USERNAME", False, "Username (BITBUCKET_USERNAME)"),
+                    VarSpec("BITBUCKET_API_TOKEN", True, "API token (BITBUCKET_API_TOKEN)"),
+                ),
+            ),
+            AuthMethod(
+                label=_DC_LABEL,
+                variables=(
+                    VarSpec(
+                        "BITBUCKET_PERSONAL_TOKEN",
+                        True,
+                        "Personal token (BITBUCKET_PERSONAL_TOKEN)",
+                    ),
+                ),
+            ),
+        ),
+        ssl_var="BITBUCKET_SSL_VERIFY",
+        verify_tool="bitbucket_list_repositories",
+        verify_args={"max_results": 1},
+    ),
+}
+"""Services in menu order, each with its URL variable, auth shapes, TLS
+variable, and the cheap read-only call that proves a setup works."""
+
+
+def validate_url(text: str) -> str | None:
+    """Return why ``text`` is not a usable service URL, or ``None`` if it is.
+
+    Only ``http``/``https`` with a non-empty host is accepted — that is the
+    shape every supported Atlassian/Bitbucket deployment has, and anything
+    else would fail far less legibly inside the HTTP stack.
+    """
+    if not text:
+        return "URL is empty — enter the full address, e.g. https://your-company.atlassian.net"
+    parts = urlsplit(text)
+    if parts.scheme not in ("http", "https"):
+        if "://" in text:
+            return f"'{text}' needs an http:// or https:// scheme, not '{parts.scheme}://'."
+        return f"'{text}' has no http:// or https:// scheme — include it, e.g. https://{text.lstrip('/')}"
+    if not parts.hostname:
+        return f"'{text}' has no host — use the full address, e.g. https://jira.example.com"
+    return None
+
+
+_PROFILE_NAME_OK = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def validate_profile_name(name: str) -> str | None:
+    """Return why ``name`` cannot head a ``[profiles.<name>]`` table, or None.
+
+    The name becomes a TOML bare header key, so it must be exactly the
+    character set tomllib accepts there — letters, digits, ``-``, ``_``.
+    Anything else (dots nest tables, spaces and quotes break the header,
+    non-ASCII varies by parser) would produce a file that does not parse.
+    """
+    if not name:
+        return "Profile name is empty."
+    if name != name.strip():
+        return "Profile name has leading or trailing whitespace."
+    if _PROFILE_NAME_OK.fullmatch(name) is None:
+        return (
+            "Profile name may only use letters, digits, '-', and '_' — "
+            f"'{name}' cannot head a [profiles.{name}] table."
+        )
+    return None
+
+
+def toml_basic_string(value: str) -> str:
+    """Serialize ``value`` as a TOML basic string (double quotes).
+
+    Uses the JSON-compatible escape set, which is exactly the escape set a
+    TOML basic string accepts for the characters that need escaping
+    (``\"``, ``\\\\``, control characters) — with one patch: DEL (U+007F)
+    is raw in JSON but rejected by tomllib inside a basic string, so it is
+    escaped explicitly. Everything else — including any unicode — passes
+    through raw.
+    """
+    return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
+
+
+def mask(value: str) -> str:
+    """A fixed-length mask; never echoes secret length back to the console."""
+    return "****"
+
+
+def _is_table_header(line: str) -> bool:
+    """True when ``line`` opens a TOML table (``[x]``) or array of tables."""
+    return line.lstrip().startswith("[")
+
+
+def _assignment_line(line: str, key: str) -> bool:
+    """True when ``line`` assigns ``key`` (``KEY = "value"`` shape, tolerating
+    leading spaces and spaces around ``=``; an inline comment may follow)."""
+    stripped = line.strip()
+    if not stripped.startswith(key):
+        return False
+    return stripped[len(key):].lstrip().startswith("=")
+
+
+def merge_profile_text(
+    text: str,
+    profile_name: str,
+    values: Mapping[str, str],
+    drop: Collection[str] = (),
+) -> str:
+    """Merge ``values`` into the ``[profiles.<profile_name>]`` table of ``text``.
+
+    Surgical by design — the same merge-never-clobber discipline the hook
+    installer applies to harness settings: only the target section's key
+    lines change (first occurrence of each key replaced wholesale, missing
+    keys appended at section end); comments, key order, and every other
+    table survive byte-identical. No section yet: the table appends at EOF
+    behind a blank separator. ``drop`` names wizard-owned keys whose
+    assignments are removed from the section first (every occurrence) —
+    re-running the wizard with different answers must not leave the
+    superseded answers behind (e.g. a TLS "verify" answer after a previous
+    "no", or Cloud credentials after a switch to a personal token).
+
+    Line surgery is exact for the config file atli reads and writes —
+    flat ``KEY = "value"`` tables — but it is still a line scan: a
+    hand-written multi-line string (``\"\"\"…\"\"\"``) or quoted key in the
+    target section is not understood (:func:`run_init`'s write-phase parse
+    guard turns any resulting surprise into a clean refusal, never a
+    corrupted file).
+    """
+    lines = text.splitlines(keepends=True)
+    header = f"[profiles.{profile_name}]"
+    rendered = {key: f"{key} = {toml_basic_string(value)}\n" for key, value in values.items()}
+
+    header_index = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if _matches_header(line, header)
+        ),
+        None,
+    )
+    if header_index is None:
+        merged = list(lines)
+        if merged and not merged[-1].endswith("\n"):
+            merged[-1] += "\n"
+        if merged and not text.endswith("\n\n"):
+            merged.append("\n")
+        merged.append(header + "\n")
+        merged.extend(rendered.values())
+        return "".join(merged)
+
+    body_end = header_index + 1
+    while body_end < len(lines) and not _is_table_header(lines[body_end]):
+        body_end += 1
+
+    body: list[str] = []
+    replaced: set[str] = set()
+    dropped: set[str] = set()
+    for line in lines[header_index + 1 : body_end]:
+        claimed = next(
+            (key for key in rendered if key not in replaced and _assignment_line(line, key)),
+            None,
+        )
+        if claimed is not None:
+            body.append(rendered[claimed])
+            replaced.add(claimed)
+            continue
+        obsolete = next(
+            (key for key in drop if key not in dropped and _assignment_line(line, key)),
+            None,
+        )
+        if obsolete is not None:
+            dropped.add(obsolete)
+            continue  # superseded wizard-owned key: the line goes away
+        body.append(line)
+    pending = [line_text for key, line_text in rendered.items() if key not in replaced]
+    if pending and body and not body[-1].endswith("\n"):
+        body[-1] += "\n"  # a hand-edited file may lack the final newline
+    updated = lines[: header_index + 1] + body + pending + lines[body_end:]
+    return "".join(updated)
+
+
+def _matches_header(line: str, header: str) -> bool:
+    """True when ``line`` is the ``header`` table header — leading
+    indentation, trailing spaces, and a trailing comment tolerated, every
+    form tomllib accepts (a missed match would append a duplicate table)."""
+    stripped = line.strip()
+    if stripped == header:
+        return True
+    return stripped.startswith(header) and stripped[len(header):][:1] in (" ", "\t", "#")
+
+
+def ensure_default_profile(text: str, profile_name: str) -> str:
+    """Set ``default_profile`` to ``profile_name`` unless one is already set.
+
+    The assignment inserts immediately before the first table header so it
+    stays top-level (a ``default_profile`` after a table header would belong
+    to that table); an existing assignment — any value — is never changed,
+    because silently re-pointing someone's default profile is exactly the
+    kind of surprise a merge must not cause.
+    """
+    lines = text.splitlines(keepends=True)
+    first_table = next(
+        (index for index, line in enumerate(lines) if _is_table_header(line)),
+        len(lines),
+    )
+    already_set = any(
+        _assignment_line(line, "default_profile") for line in lines[:first_table]
+    )
+    if already_set:
+        return text
+    assignment = f"default_profile = {toml_basic_string(profile_name)}\n"
+    if first_table == len(lines):
+        merged = list(lines)
+        if merged and not merged[-1].endswith("\n"):
+            merged[-1] += "\n"
+        merged.append(assignment)
+        return "".join(merged)
+    return "".join(lines[:first_table] + [assignment] + lines[first_table:])
+
+
+def write_config(path: Path, content: str) -> None:
+    """Atomically write ``content`` to ``path`` with owner-only permissions.
+
+    The tmp file is CREATED with mode 0600 (``os.open`` — umask can only
+    clear bits, never set them), so the credentials never exist on disk
+    with group/other read bits at any instant; the rename over the target
+    is atomic, so a crash mid-write can only leave the pre-write file,
+    never a partial or exposed one.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(path.name + ".tmp")
+    descriptor = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(content)
+    os.replace(tmp_path, path)
+    path.chmod(0o600)
+
+
+def config_target_path(
+    scope: str,
+    *,
+    environ: Mapping[str, str],
+    home: Path,
+    cwd: Path,
+) -> Path:
+    """The config file a scope writes: project → ``./.atli.toml`` beside the
+    repo, global → the machine file runtime reads.
+
+    Global honors ``$ATLI_CONFIG`` when it points at an existing file (init
+    must write what runtime loads); a set-but-missing path is the same
+    user-fixable error ``config.find_config_file`` raises — in production
+    ``main`` surfaces it before init ever runs, the check here covers direct
+    library use. No explicit override: ``~/.config/atli/config.toml``.
+    """
+    if scope == "project":
+        return cwd / ".atli.toml"
+    if scope == "global":
+        explicit = environ.get("ATLI_CONFIG")
+        if explicit:
+            path = Path(explicit)
+            if path.is_file():
+                return path
+            raise ConfigError(
+                f"ATLI_CONFIG is set to '{explicit}', but that file does not "
+                "exist. Point ATLI_CONFIG at an existing TOML config file, "
+                "or unset it."
+            )
+        return home / ".config" / "atli" / "config.toml"
+    raise ConfigError(f"Unknown scope '{scope}' — use 'project' or 'global'.")
+
+
+@runtime_checkable
+class Prompt(Protocol):
+    """The wizard's conversation surface; injectable for tests.
+
+    ``ask`` renders ``default`` inside the prompt text but returns the RAW
+    answer — an empty string means "pressed Enter", and interpreting it as
+    the default is the caller's job (one rule, one place).
+    """
+
+    def ask(self, prompt: str, *, default: str | None = None) -> str: ...
+
+    def ask_secret(self, prompt: str) -> str: ...
+
+
+class ConsolePrompt:
+    """The production :class:`Prompt`: ``input`` for plain answers,
+    ``getpass`` for secrets (never echoed, never in shell history)."""
+
+    def ask(self, prompt: str, *, default: str | None = None) -> str:
+        suffix = f" [{default}]" if default is not None else ""
+        return input(f"{prompt}{suffix}: ")
+
+    def ask_secret(self, prompt: str) -> str:
+        return getpass(f"{prompt}: ")
+
+
+def console_prompt() -> Prompt:
+    return ConsolePrompt()
+
+
+def collect_profile(
+    service: str,
+    prompt: Prompt,
+    out: Callable[[str], None] = print,
+    *,
+    keep_url: str | None = None,
+) -> dict[str, str]:
+    """Wizard steps 1-3: URL, auth method + its variables, TLS choice.
+
+    ``keep_url`` skips the URL prompt (a credentials-only retry keeps the
+    URL the user already entered). Every answer is validated where it is
+    entered — URL shape, non-empty credentials, latin-1-safe header values
+    (:func:`mcp_atlassian_cli.config.validate_credentials` is the same rule
+    runtime enforces) — so a bad value re-prompts immediately with the
+    reason instead of surfacing as an HTTP error on first use.
+    """
+    spec = SERVICES[service]
+    values: dict[str, str] = {}
+
+    if keep_url is not None:
+        values[spec.url_var] = keep_url
+    else:
+        url_prompt = f"{service.title()} URL"
+        if spec.url_hint:
+            url_prompt += f" ({spec.url_hint})"
+        while True:
+            answer = prompt.ask(url_prompt, default=spec.url_default)
+            if spec.url_default is not None and answer == "":
+                answer = spec.url_default
+            answer = answer.strip()  # a pasted trailing space is a classic
+            error = validate_url(answer)
+            if error is None:
+                values[spec.url_var] = answer
+                break
+            out(error)
+
+    menu = "\n".join(
+        f"{number}) {method.label}"
+        + (" (default)" if number == 1 else "")
+        for number, method in enumerate(spec.auth_methods, start=1)
+    )
+    while True:
+        choice = prompt.ask(f"Auth method\n{menu}")
+        if choice == "":
+            choice = "1"
+        # isdecimal, not isdigit: "²".isdigit() is True but int() rejects it
+        if choice.isdecimal() and 1 <= int(choice) <= len(spec.auth_methods):
+            method = spec.auth_methods[int(choice) - 1]
+            break
+        out(f"Choose 1-{len(spec.auth_methods)} (or press Enter for 1).")
+    for variable in method.variables:
+        while True:
+            answer = (
+                prompt.ask_secret(variable.prompt_label)
+                if variable.secret
+                else prompt.ask(variable.prompt_label)
+            )
+            if not answer:
+                out("Value is required.")
+                continue
+            # Every collected value is header-bound (Basic-auth usernames
+            # included), so every value gets the latin-1 entry check — the
+            # cryptic http.client failure must never survive the prompt.
+            try:
+                validate_credentials({variable.env_name: answer})
+            except ConfigError as error:
+                out(str(error))
+                continue
+            values[variable.env_name] = answer
+            break
+
+    while True:
+        answer = prompt.ask(
+            "Verify TLS certificates? [Y/n] (behind a corporate proxy with a "
+            "self-signed CA, answer n)",
+            default="y",
+        ).lower()
+        if answer in ("", "y"):
+            break
+        if answer == "n":
+            values[spec.ssl_var] = "false"
+            break
+        out("Please answer y or n.")
+    return values
+
+
+def choose_scope(prompt: Prompt, out: Callable[[str], None] = print) -> str:
+    """Project vs global; global is the default — credentials inside a repo
+    risk accidental commits."""
+    while True:
+        answer = prompt.ask("Scope\n1) global — ~/.config/atli + home harness settings (default)\n2) project — ./.atli.toml + repo harness settings")
+        if answer in ("", "1"):
+            return "global"
+        if answer == "2":
+            return "project"
+        out("Choose 1 (global) or 2 (project).")
+
+
+def choose_profile_name(
+    service: str, prompt: Prompt, out: Callable[[str], None] = print
+) -> str:
+    """Profile name, defaulting to the service name."""
+    while True:
+        name = prompt.ask("Profile name", default=service)
+        if name == "":
+            name = service
+        error = validate_profile_name(name)
+        if error is None:
+            return name
+        out(error)
+
+
+def choose_harness(
+    prompt: Prompt, home: Path, out: Callable[[str], None] = print
+) -> str | None:
+    """Pick a harness for the SessionStart hook, or skip.
+
+    Supported harnesses in registry order; a detected config dir under
+    ``home`` marks (detected) and makes that harness the Enter default —
+    falling back to claude. ``s`` skips the hook entirely.
+    """
+    from mcp_atlassian_cli.install import HARNESSES
+
+    supported = [h for h in HARNESSES.values() if h.supported]
+    detected = [h for h in supported if (home / h.detect_dir_name).exists()]
+    default = detected[0] if detected else supported[0]
+    menu = "\n".join(
+        f"{number}) {h.name}"
+        + (" (detected)" if h in detected else "")
+        + (" (default)" if h is default else "")
+        for number, h in enumerate(supported, start=1)
+    )
+    while True:
+        answer = prompt.ask(f"Harness — install the SessionStart primer hook?\n{menu}\ns) skip hook for now")
+        if answer == "":
+            return default.name
+        if answer.lower() == "s":
+            return None
+        if answer.isdecimal() and 1 <= int(answer) <= len(supported):
+            return supported[int(answer) - 1].name
+        out(f"Choose 1-{len(supported)} or s.")
+
+
+def choose_service(prompt: Prompt, out: Callable[[str], None] = print) -> str:
+    """The bare ``atli init`` service menu; no default — a choice is owed."""
+    names = list(SERVICES)
+    menu = "\n".join(f"{n}) {name}" for n, name in enumerate(names, start=1))
+    while True:
+        answer = prompt.ask(f"Which service?\n{menu}")
+        if answer.isdecimal() and 1 <= int(answer) <= len(names):
+            return names[int(answer) - 1]
+        out(f"Choose 1-{len(names)}.")
+
+
+def render_summary(
+    service: str,
+    values: Mapping[str, str],
+    *,
+    config_path: Path,
+    profile_name: str,
+    harness: str | None,
+    scope: str,
+) -> str:
+    """The pre-flight confirmation: everything about to be written, secrets
+    masked with a fixed-length ``****`` (no length leak)."""
+    lines = [f"Service: {service}"]
+    for key, value in values.items():
+        masked = key.endswith(CREDENTIAL_SUFFIXES)
+        lines.append(f"{key}: {mask(value) if masked else value}")
+    lines.append(f"Config: {config_path}")
+    lines.append(f"Profile: {profile_name}")
+    lines.append(f"Scope: {scope}")
+    lines.append(f"hook: {harness if harness is not None else 'skipped'}")
+    lines.append("Next: verify with one live read-only call, then write.")
+    return "\n".join(lines)
+
+
+def verify_profile(
+    service: str,
+    values: Mapping[str, str],
+    environ: MutableMapping[str, str],
+    runner_factory: Callable[[], object] | None = None,
+) -> None:
+    """Prove the collected setup with one cheap read-only call.
+
+    Applies the profile to ``environ`` first — ``apply_profile``'s
+    per-prefix replacement gives the same stale-credential isolation a real
+    run gets — then pays the one-time mcp-atlassian import (skipped
+    entirely when ``runner_factory`` is injected) and fires the service's
+    verification call. Any result, including zero hits, proves URL +
+    credentials + TLS settings; auth/URL failures raise the runner's
+    exceptions for the caller's recovery menu.
+    """
+    spec = SERVICES[service]
+    apply_profile(values, environ)
+    if runner_factory is not None:
+        runner = runner_factory()
+    else:
+        from mcp_atlassian_cli.runner import ToolRunner
+
+        runner = ToolRunner()
+    runner.call_tool(spec.verify_tool, dict(spec.verify_args))
+
+
+_EXAMPLE_COMMAND: dict[str, str] = {
+    "jira": 'search --jql "assignee = currentUser()"',
+    "confluence": 'search --query "deploy"',
+    "bitbucket": "list-repositories",
+}
+
+
+def run_init(
+    service: str,
+    *,
+    prompt: Prompt,
+    home: Path,
+    cwd: Path,
+    environ: MutableMapping[str, str],
+    runner_factory: Callable[[], object] | None = None,
+    out: Callable[[str], None] = print,
+) -> int:
+    """The whole ``atli init <service>`` wizard; returns the process exit code.
+
+    Nothing touches disk until the live verification succeeds — a declined
+    confirm or an aborted recovery leaves the machine exactly as it was.
+    Exit codes: 0 success (a clean decline included); 1 verification
+    failure whose recovery was abandoned; 2 user-fixable configuration
+    problems (provider mismatch, unreadable config, broken harness
+    settings).
+    """
+    from mcp_atlassian_cli.install import install as install_hook
+    from mcp_atlassian_cli.runner import ToolCallFailure, ToolRunnerError
+
+    if service == "bitbucket" and providers.detect_provider() == "atlassian":
+        hint = providers.bitbucket_hint("atlassian")
+        out(hint or "This environment has the [atlassian] provider, which cannot mount Bitbucket tools.")
+        return 2
+
+    spec = SERVICES[service]
+    # Every key the wizard can ever own for this service: the URL, all auth
+    # methods' variables, and the TLS toggle. Keys NOT in this run's values
+    # are dropped from the target section at merge time, so re-running init
+    # with different answers never leaves superseded state behind (a stale
+    # SSL_VERIFY="false" would silently downgrade TLS; old Cloud
+    # credentials would ride next to a new personal token).
+    owned_keys = {spec.url_var, spec.ssl_var} | {
+        variable.env_name for method in spec.auth_methods for variable in method.variables
+    }
+    keep_url: str | None = None
+    while True:
+        values = collect_profile(service, prompt, out, keep_url=keep_url)
+        scope = choose_scope(prompt, out)
+        if scope == "project":
+            out(
+                "Tip: add .atli.toml to your repository's .gitignore — "
+                "it holds plaintext credentials."
+            )
+        profile_name = choose_profile_name(service, prompt, out)
+        harness = choose_harness(prompt, home, out)
+        try:
+            config_path = config_target_path(scope, environ=environ, home=home, cwd=cwd)
+        except ConfigError as error:
+            out(str(error))
+            return 2
+        if scope == "project" and environ.get("ATLI_CONFIG"):
+            out(
+                f"Note: $ATLI_CONFIG ({environ['ATLI_CONFIG']}) is set — at "
+                "runtime it outranks ./.atli.toml, so this profile will not "
+                "be the one atli loads unless you unset it."
+            )
+        out(
+            render_summary(
+                service,
+                values,
+                config_path=config_path,
+                profile_name=profile_name,
+                harness=harness,
+                scope=scope,
+            )
+        )
+        while True:
+            proceed = prompt.ask("Proceed? [Y/n]", default="y").lower()
+            if proceed in ("", "y"):
+                break
+            if proceed == "n":
+                out("Nothing written.")
+                return 0
+            out("Please answer y or n.")
+        try:
+            verify_profile(service, values, environ, runner_factory=runner_factory)
+        except (ToolCallFailure, ToolRunnerError) as error:
+            out(str(error))
+            while True:
+                answer = prompt.ask(
+                    "1) Re-enter credentials (same URL)  2) Change URL  3) Abort"
+                )
+                if answer == "1":
+                    keep_url = values[spec.url_var]
+                    break
+                if answer == "2":
+                    keep_url = None
+                    break
+                if answer == "3":
+                    return 1
+                out("Choose 1, 2, or 3.")
+            continue
+        break
+
+    try:
+        existing = (
+            config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+        )
+    except (OSError, UnicodeDecodeError) as error:
+        out(str(ConfigError(f"Could not read config file '{config_path}': {error}")))
+        return 2
+    try:
+        previous_default = tomllib.loads(existing).get("default_profile") if existing else None
+    except TOMLDecodeError:
+        previous_default = None
+    superseded = owned_keys - set(values)
+    merged = ensure_default_profile(
+        merge_profile_text(existing, profile_name, values, drop=superseded),
+        profile_name,
+    )
+    # Parse guard: this layer's whole contract is "never corrupt the
+    # user's file", so the merged text is proven to parse AND to carry
+    # exactly what this run collected before a single byte is written —
+    # a surgery regression becomes a clean refusal, never a broken config.
+    try:
+        written_profile = tomllib.loads(merged)["profiles"][profile_name]
+    except (TOMLDecodeError, KeyError) as error:
+        out(
+            str(
+                ConfigError(
+                    f"Refusing to write '{config_path}': the merged profile "
+                    f"does not parse ({error!r}). Your file is unchanged — "
+                    "please report this as an atli bug."
+                )
+            )
+        )
+        return 2
+    expected = dict(values)
+    if any(written_profile.get(key) != value for key, value in expected.items()):
+        out(
+            str(
+                ConfigError(
+                    f"Refusing to write '{config_path}': the merged profile "
+                    "does not carry exactly the collected values. Your file "
+                    "is unchanged — please report this as an atli bug."
+                )
+            )
+        )
+        return 2
+    write_config(config_path, merged)
+    out(f"config: {config_path} (profile '{profile_name}', chmod 600)")
+    if isinstance(previous_default, str) and previous_default != profile_name:
+        out(f"default profile: '{previous_default}' (unchanged)")
+    if harness is not None:
+        try:
+            out(
+                install_hook(
+                    harness,
+                    "user" if scope == "global" else "project",
+                    home=home,
+                    cwd=cwd,
+                )
+            )
+        except ConfigError as error:
+            out(str(error))
+            return 2
+    else:
+        out("hook: skipped (install later with `atli prime --install`)")
+    out(f"{service}: {values.get(spec.url_var, '')}")
+    out(f"Try: atli {service} {_EXAMPLE_COMMAND[service]}")
+    out("Primer: atli prime")
+    return 0

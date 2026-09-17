@@ -139,13 +139,17 @@ def test_unsupported_harness_reports_without_touching_disk(tmp_path: Path) -> No
 
 def test_run_install_detects_installed_harnesses(tmp_path: Path) -> None:
     home = tmp_path / "home"
-    (home / ".claude").mkdir(parents=True)
-    # .codex absent, .gemini absent
+    for dir_name in (".claude", ".qwen", ".gigacode", ".codex"):
+        (home / dir_name).mkdir(parents=True)
+    # .gemini absent
 
     messages = run_install(None, "user", home=home, cwd=tmp_path)
 
-    assert len(messages) == 1
-    assert messages[0].startswith("installed:")
+    assert len(messages) == 4
+    assert all(m.startswith("installed:") for m in messages)
+    codex_lines = [m for m in messages if "/.codex/" in m.replace("\\", "/")]
+    assert len(codex_lines) == 1
+    assert codex_lines[0].endswith(" — trust it via /hooks on first run")
 
 
 def test_run_install_nothing_detected_teaches_instead_of_silence(
@@ -180,6 +184,8 @@ def test_run_install_unknown_harness_names_everything(tmp_path: Path) -> None:
     assert "claude" in str(excinfo.value)
     assert "gemini" in str(excinfo.value)
     assert "codex" in str(excinfo.value)
+    assert "qwen" in str(excinfo.value)
+    assert "gigacode" in str(excinfo.value)
 
 
 def test_install_project_scope_writes_cwd(tmp_path: Path) -> None:
@@ -193,8 +199,63 @@ def test_install_project_scope_writes_cwd(tmp_path: Path) -> None:
     assert settings["hooks"]["SessionStart"][0]["hooks"][0]["command"] == HOOK_COMMAND
 
 
-def test_harness_registry_covers_all_three() -> None:
-    assert set(HARNESSES) == {"claude", "gemini", "codex"}
+def test_harness_registry_covers_all_five() -> None:
+    assert set(HARNESSES) == {"claude", "gemini", "codex", "qwen", "gigacode"}
     assert HARNESSES["claude"].supported is True
     assert HARNESSES["gemini"].supported is False
-    assert HARNESSES["codex"].supported is False
+    assert HARNESSES["codex"].supported is True
+    assert HARNESSES["codex"].settings_relpaths == {
+        "user": ".codex/hooks.json",
+        "project": ".codex/hooks.json",
+    }
+    assert HARNESSES["codex"].install_note
+    for name, dir_name, relpath in (
+        ("qwen", ".qwen", ".qwen/settings.json"),
+        ("gigacode", ".gigacode", ".gigacode/settings.json"),
+    ):
+        assert HARNESSES[name].supported is True
+        assert HARNESSES[name].detect_dir_name == dir_name
+        assert HARNESSES[name].settings_relpaths == {"user": relpath, "project": relpath}
+        assert HARNESSES[name].install_note == ""
+
+
+def test_install_codex_writes_hooks_json(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+
+    message = install("codex", "user", home=home, cwd=tmp_path)
+
+    assert message.startswith("installed:")
+    assert message.endswith(" — trust it via /hooks on first run")
+    hooks = json.loads((home / ".codex" / "hooks.json").read_text(encoding="utf-8"))
+    assert hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"] == HOOK_COMMAND
+
+
+def test_install_codex_already_installed_keeps_note(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+
+    first = install("codex", "user", home=home, cwd=tmp_path)
+    written = (home / ".codex" / "hooks.json").read_text(encoding="utf-8")
+    second = install("codex", "user", home=home, cwd=tmp_path)
+
+    assert first.startswith("installed:")
+    assert second.startswith("already installed:")
+    assert second.endswith(" — trust it via /hooks on first run")
+    assert (home / ".codex" / "hooks.json").read_text(encoding="utf-8") == written
+
+
+@pytest.mark.parametrize(
+    "name,dir_name",
+    [("qwen", ".qwen"), ("gigacode", ".gigacode")],
+)
+def test_install_qwen_and_gigacode(tmp_path: Path, name: str, dir_name: str) -> None:
+    home = tmp_path / "home"
+
+    first = install(name, "user", home=home, cwd=tmp_path)
+    second = install(name, "user", home=home, cwd=tmp_path)
+
+    assert first.startswith("installed:")
+    assert "install_note" not in first  # no caveat suffix for these harnesses
+    assert first.endswith(HOOK_COMMAND + ")")
+    assert second.startswith("already installed:")
+    settings = json.loads((home / dir_name / "settings.json").read_text(encoding="utf-8"))
+    assert settings["hooks"]["SessionStart"][0]["hooks"][0]["command"] == HOOK_COMMAND

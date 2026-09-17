@@ -857,3 +857,106 @@ def test_harden_stdout_swallows_oserror_from_reconfigure(
 
     monkeypatch.setattr(sys, "stdout", _Broken())
     _harden_stdout()  # must not raise
+
+
+def test_main_init_fast_path_beats_stub(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`init` dispatches via the fast path — create_app must never run."""
+    from mcp_atlassian_cli import build
+
+    def forbidden_create_app(*args: object, **kwargs: object) -> Any:
+        raise AssertionError("create_app must not be built for init")
+
+    received: list[list[str]] = []
+
+    class StubInitApp:
+        def __call__(self, argv: list[str], **kwargs: object) -> None:
+            received.append(list(argv))
+            raise SystemExit(0)
+
+    monkeypatch.setattr(build, "create_app", forbidden_create_app)
+    monkeypatch.setattr(build, "create_init_app", lambda *a, **kw: StubInitApp())
+
+    assert main(["init", "jira"]) == 0
+    assert received == [["init", "jira"]]
+
+
+def test_main_init_help_never_imports_server() -> None:
+    """`atli init --help` answers before any mcp_atlassian import — and
+    actually renders help (exit 0, service names on stdout)."""
+    code = (
+        "from mcp_atlassian_cli.main import main; "
+        "import sys; "
+        "rc = main(['init', '--help']); "
+        "sys.exit(rc if 'mcp_atlassian' not in sys.modules else 1)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "jira" in result.stdout
+
+
+def test_main_init_bitbucket_provider_gate_exit_2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mcp_atlassian_cli import providers
+
+    monkeypatch.setattr(providers, "detect_provider", lambda: "atlassian")
+    monkeypatch.setattr(providers, "bitbucket_hint", lambda p: "install the fork provider")
+
+    assert main(["init", "bitbucket"]) == 2
+    assert "install the fork provider" in capsys.readouterr().out
+
+
+class _BailingPrompt:
+    """A console prompt whose first question raises (Ctrl-C / Ctrl-D)."""
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+
+    def ask(self, prompt: str, *, default: str | None = None) -> str:
+        raise self._error
+
+    def ask_secret(self, prompt: str) -> str:
+        raise self._error
+
+
+def test_main_init_keyboard_interrupt_exit_1(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Ctrl-C at a wizard prompt must surface as the clean-abort contract.
+    Driven through the REAL cyclopts dispatch (create_init_app + the
+    suppress_keyboard_interrupt=False root flag) — a stub app would bypass
+    the very interception this test exists to pin (cyclopts defaults the
+    flag to True and converts Ctrl-C to SystemExit(130))."""
+    from mcp_atlassian_cli import init as init_mod
+
+    monkeypatch.setattr(
+        init_mod, "console_prompt", lambda: _BailingPrompt(KeyboardInterrupt())
+    )
+
+    assert main(["init", "jira"]) == 1
+    assert "Aborted — nothing written." in capsys.readouterr().err
+
+
+def test_main_init_eof_exit_1(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Ctrl-D / exhausted stdin at a wizard prompt: same clean abort —
+    never a raw EOFError traceback (agents piping calls hit this first)."""
+    from mcp_atlassian_cli import init as init_mod
+
+    monkeypatch.setattr(init_mod, "console_prompt", lambda: _BailingPrompt(EOFError()))
+
+    assert main(["init", "jira"]) == 1
+    assert "Aborted — nothing written." in capsys.readouterr().err
+
+
+def test_main_init_usage_error_exit_2(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["init", "bogus"]) == 2
+    assert capsys.readouterr().err.strip() != ""

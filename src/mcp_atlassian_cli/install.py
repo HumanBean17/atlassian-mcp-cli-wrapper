@@ -1,16 +1,17 @@
-"""SessionStart hook installer for ``atli prime --install``.
+"""SessionStart hook installer for ``atli prime --install`` and ``atli init``.
 
 Onboarding is the cold-start bottleneck: without a hook, agents never hear
 of atli. This module merges the prime hook into existing harness settings —
 merge, never clobber — so one command onboards a machine or project.
 
-Harness support matrix (verified 2026-08): Claude Code's SessionStart hook
-injects ``additionalContext`` and is supported. Gemini CLI runs SessionStart
-hooks but does not inject their context (gemini-cli issue #15413). Codex
-hooks sit behind the experimental ``[features] codex_hooks`` flag with known
-firing issues. Unsupported harnesses report themselves and touch nothing;
-their registry entries carry the settings paths so enabling them later is a
-data change, not new code.
+Harness support matrix (verified 2026-09): Claude Code, Codex (``hooks.json``,
+one-time ``/hooks`` trust review on first run), Qwen Code, and GigaCode (a
+Qwen fork: full parity with renamed paths) all inject SessionStart
+``additionalContext`` and are supported — all four via the same JSON hook
+shape, so one merge routine serves them. Gemini CLI runs SessionStart
+hooks but does not inject their context (gemini-cli issue #15413) and stays
+unsupported; its registry entry carries the settings paths so enabling it
+later is a data change, not new code.
 """
 
 from __future__ import annotations
@@ -42,6 +43,10 @@ class Harness:
     note: str = ""
     """Why the harness is unsupported; shown in the report line."""
 
+    install_note: str = ""
+    """Caveat appended to the report line when installing (e.g. codex's
+    one-time ``/hooks`` trust review); empty for clean installs."""
+
 
 HARNESSES: dict[str, Harness] = {
     "claude": Harness(
@@ -68,11 +73,29 @@ HARNESSES: dict[str, Harness] = {
         name="codex",
         detect_dir_name=".codex",
         settings_relpaths={
-            "user": ".codex/config.toml",
-            "project": ".codex/config.toml",
+            "user": ".codex/hooks.json",
+            "project": ".codex/hooks.json",
         },
-        supported=False,
-        note="hooks are experimental behind [features] codex_hooks",
+        supported=True,
+        install_note="trust it via /hooks on first run",
+    ),
+    "qwen": Harness(
+        name="qwen",
+        detect_dir_name=".qwen",
+        settings_relpaths={
+            "user": ".qwen/settings.json",
+            "project": ".qwen/settings.json",
+        },
+        supported=True,
+    ),
+    "gigacode": Harness(
+        name="gigacode",
+        detect_dir_name=".gigacode",
+        settings_relpaths={
+            "user": ".gigacode/settings.json",
+            "project": ".gigacode/settings.json",
+        },
+        supported=True,
     ),
 }
 
@@ -147,8 +170,9 @@ def install(name: str, scope: str, *, home: Path, cwd: Path) -> str:
                 "re-run."
             )
     merged, changed = merge_hook(settings)
+    caveat = f" — {harness.install_note}" if harness.install_note else ""
     if not changed:
-        return f"already installed: {path}"
+        return f"already installed: {path}{caveat}"
     path.parent.mkdir(parents=True, exist_ok=True)
     # Atomic swap: write the sibling temp file, then rename over the target —
     # a crash mid-write can never truncate the user's settings (the very
@@ -158,7 +182,7 @@ def install(name: str, scope: str, *, home: Path, cwd: Path) -> str:
         json.dumps(merged, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     os.replace(tmp_path, path)
-    return f"installed: {path} (SessionStart += {HOOK_COMMAND})"
+    return f"installed: {path} (SessionStart += {HOOK_COMMAND}){caveat}"
 
 
 def run_install(
