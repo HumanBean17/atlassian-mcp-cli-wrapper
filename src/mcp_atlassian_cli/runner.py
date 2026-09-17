@@ -210,7 +210,14 @@ class ToolRunner:
         fresh WARNING StreamHandler on the root logger — silencing before the
         import would just be undone by it.
         """
-        from fastmcp import Client
+        try:
+            from fastmcp import Client
+        except (ImportError, AttributeError, TypeError) as error:
+            # A broken fastmcp fails HERE, before the provider import in
+            # ``self._app`` ever runs — it needs the same diagnosis, or the
+            # blanket handlers report "no provider installed" over a hybrid
+            # fastmcp directory (issue #7).
+            raise ToolRunnerError(_import_guidance(error)) from error
 
         app = self._app
         _silence_server_logging()
@@ -241,7 +248,13 @@ class ToolRunner:
 
         try:
             from fastmcp.exceptions import ToolError  # noqa: F401  (except clause)
+        except (ImportError, AttributeError, TypeError) as error:
+            # Same broken-fastmcp path as ``_client``; raising here also keeps
+            # the ``except ToolError`` clause below from touching an unbound
+            # name when the import itself is what failed.
+            raise ToolRunnerError(_import_guidance(error)) from error
 
+        try:
             return asyncio.run(run())
         except ToolRunnerError:
             raise
