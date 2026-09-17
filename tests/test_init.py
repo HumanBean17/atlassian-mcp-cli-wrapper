@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import subprocess
 import sys
@@ -234,7 +235,8 @@ def test_write_config_atomic_and_private(tmp_path: Path) -> None:
     write_config(target, '[profiles.work]\nK = "v"\n')
 
     assert target.read_text(encoding="utf-8") == '[profiles.work]\nK = "v"\n'
-    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    if os.name == "posix":  # Windows has no POSIX mode bits (ACLs govern)
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert sorted(p.name for p in target.parent.iterdir()) == ["config.toml"]
 
 
@@ -420,7 +422,7 @@ def test_render_summary_masks_credentials() -> None:
             "JIRA_USERNAME": "you@work.com",
             "JIRA_API_TOKEN": "tok",
         },
-        config_path=Path("/tmp/x/.atli.toml"),
+        config_path=Path("/tmp/x/.atli.toml"),  # native separators
         profile_name="jira",
         harness=None,
         scope="project",
@@ -431,7 +433,7 @@ def test_render_summary_masks_credentials() -> None:
     assert "JIRA_API_TOKEN: ****" in summary
     assert "tok" not in summary
     assert "hook: skipped" in summary
-    assert "/tmp/x/.atli.toml" in summary
+    assert str(Path("/tmp/x/.atli.toml")) in summary
     assert "jira" in summary
     assert "project" in summary
 
@@ -554,7 +556,8 @@ def test_run_init_happy_path_writes_and_reports(tmp_path: Path) -> None:
 
     assert code == 0
     config = home / ".config" / "atli" / "config.toml"
-    assert stat.S_IMODE(config.stat().st_mode) == 0o600
+    if os.name == "posix":
+        assert stat.S_IMODE(config.stat().st_mode) == 0o600
     data = tomllib.loads(config.read_text(encoding="utf-8"))
     assert data["default_profile"] == "jira"
     assert data["profiles"]["jira"]["JIRA_API_TOKEN"] == "tok-123"
@@ -582,7 +585,8 @@ def test_run_init_merge_preserves_existing_profile_and_default(tmp_path: Path) -
 
     assert code == 0
     result = config.read_text(encoding="utf-8")
-    assert stat.S_IMODE(config.stat().st_mode) == 0o600  # tightened on overwrite
+    if os.name == "posix":
+        assert stat.S_IMODE(config.stat().st_mode) == 0o600  # tightened on overwrite
     assert "# hand-written" in result
     assert 'default_profile = "dc"' in result
     assert 'JIRA_URL = "https://dc.internal"' in result

@@ -147,7 +147,7 @@ def test_run_install_detects_installed_harnesses(tmp_path: Path) -> None:
 
     assert len(messages) == 4
     assert all(m.startswith("installed:") for m in messages)
-    codex_lines = [m for m in messages if "/.codex/" in m]
+    codex_lines = [m for m in messages if "/.codex/" in m.replace("\\", "/")]
     assert len(codex_lines) == 1
     assert codex_lines[0].endswith(" — trust it via /hooks on first run")
 
