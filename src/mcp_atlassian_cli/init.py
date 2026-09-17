@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from getpass import getpass
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
-from mcp_atlassian_cli.config import ConfigError
+from mcp_atlassian_cli.config import CREDENTIAL_SUFFIXES, ConfigError, validate_credentials
 
 
 @dataclass(frozen=True)
@@ -351,3 +353,197 @@ def config_target_path(
             )
         return home / ".config" / "atli" / "config.toml"
     raise ConfigError(f"Unknown scope '{scope}' — use 'project' or 'global'.")
+
+
+@runtime_checkable
+class Prompt(Protocol):
+    """The wizard's conversation surface; injectable for tests.
+
+    ``ask`` renders ``default`` inside the prompt text but returns the RAW
+    answer — an empty string means "pressed Enter", and interpreting it as
+    the default is the caller's job (one rule, one place).
+    """
+
+    def ask(self, prompt: str, *, default: str | None = None) -> str: ...
+
+    def ask_secret(self, prompt: str) -> str: ...
+
+
+class ConsolePrompt:
+    """The production :class:`Prompt`: ``input`` for plain answers,
+    ``getpass`` for secrets (never echoed, never in shell history)."""
+
+    def ask(self, prompt: str, *, default: str | None = None) -> str:
+        suffix = f" [{default}]" if default is not None else ""
+        return input(f"{prompt}{suffix}: ")
+
+    def ask_secret(self, prompt: str) -> str:
+        return getpass(f"{prompt}: ")
+
+
+def console_prompt() -> Prompt:
+    return ConsolePrompt()
+
+
+def collect_profile(
+    service: str, prompt: Prompt, out: Callable[[str], None] = print
+) -> dict[str, str]:
+    """Wizard steps 1-3: URL, auth method + its variables, TLS choice.
+
+    Every answer is validated where it is entered — URL shape, non-empty
+    credentials, latin-1-safe secrets (the same rule
+    :func:`mcp_atlassian_cli.config.validate_credentials` enforces at
+    runtime) — so a bad value re-prompts immediately with the reason
+    instead of surfacing as an HTTP error on first use.
+    """
+    spec = SERVICES[service]
+    values: dict[str, str] = {}
+
+    url_prompt = f"{service.title()} URL"
+    if spec.url_hint:
+        url_prompt += f" ({spec.url_hint})"
+    while True:
+        answer = prompt.ask(url_prompt, default=spec.url_default)
+        if spec.url_default is not None and answer == "":
+            answer = spec.url_default
+        error = validate_url(answer)
+        if error is None:
+            values[spec.url_var] = answer
+            break
+        out(error)
+
+    menu = "\n".join(
+        f"{number}) {method.label}"
+        + (" (default)" if number == 1 else "")
+        for number, method in enumerate(spec.auth_methods, start=1)
+    )
+    while True:
+        choice = prompt.ask(f"Auth method\n{menu}")
+        if choice == "":
+            choice = "1"
+        if choice.isdigit() and 1 <= int(choice) <= len(spec.auth_methods):
+            method = spec.auth_methods[int(choice) - 1]
+            break
+        out(f"Choose 1-{len(spec.auth_methods)} (or press Enter for 1).")
+    for variable in method.variables:
+        while True:
+            answer = (
+                prompt.ask_secret(variable.prompt_label)
+                if variable.secret
+                else prompt.ask(variable.prompt_label)
+            )
+            if not answer:
+                out("Value is required.")
+                continue
+            if variable.secret:
+                try:
+                    validate_credentials({variable.env_name: answer})
+                except ConfigError as error:
+                    out(str(error))
+                    continue
+            values[variable.env_name] = answer
+            break
+
+    while True:
+        answer = prompt.ask(
+            "Verify TLS certificates? [Y/n] (behind a corporate proxy with a "
+            "self-signed CA, answer n)",
+            default="y",
+        ).lower()
+        if answer in ("", "y"):
+            break
+        if answer == "n":
+            values[spec.ssl_var] = "false"
+            break
+        out("Please answer y or n.")
+    return values
+
+
+def choose_scope(prompt: Prompt, out: Callable[[str], None] = print) -> str:
+    """Project vs global; global is the default — credentials inside a repo
+    risk accidental commits."""
+    while True:
+        answer = prompt.ask("Scope\n1) global — ~/.config/atli + home harness settings (default)\n2) project — ./.atli.toml + repo harness settings")
+        if answer in ("", "1"):
+            return "global"
+        if answer == "2":
+            return "project"
+        out("Choose 1 (global) or 2 (project).")
+
+
+def choose_profile_name(
+    service: str, prompt: Prompt, out: Callable[[str], None] = print
+) -> str:
+    """Profile name, defaulting to the service name."""
+    while True:
+        name = prompt.ask("Profile name", default=service)
+        if name == "":
+            name = service
+        error = validate_profile_name(name)
+        if error is None:
+            return name
+        out(error)
+
+
+def choose_harness(
+    prompt: Prompt, home: Path, out: Callable[[str], None] = print
+) -> str | None:
+    """Pick a harness for the SessionStart hook, or skip.
+
+    Supported harnesses in registry order; a detected config dir under
+    ``home`` marks (detected) and makes that harness the Enter default —
+    falling back to claude. ``s`` skips the hook entirely.
+    """
+    from mcp_atlassian_cli.install import HARNESSES
+
+    supported = [h for h in HARNESSES.values() if h.supported]
+    detected = [h for h in supported if (home / h.detect_dir_name).exists()]
+    default = detected[0] if detected else supported[0]
+    menu = "\n".join(
+        f"{number}) {h.name}"
+        + (" (detected)" if h in detected else "")
+        + (" (default)" if h is default else "")
+        for number, h in enumerate(supported, start=1)
+    )
+    while True:
+        answer = prompt.ask(f"Harness — install the SessionStart primer hook?\n{menu}\ns) skip hook for now")
+        if answer == "":
+            return default.name
+        if answer.lower() == "s":
+            return None
+        if answer.isdigit() and 1 <= int(answer) <= len(supported):
+            return supported[int(answer) - 1].name
+        out(f"Choose 1-{len(supported)} or s.")
+
+
+def choose_service(prompt: Prompt, out: Callable[[str], None] = print) -> str:
+    """The bare ``atli init`` service menu; no default — a choice is owed."""
+    names = list(SERVICES)
+    menu = "\n".join(f"{n}) {name}" for n, name in enumerate(names, start=1))
+    while True:
+        answer = prompt.ask(f"Which service?\n{menu}")
+        if answer.isdigit() and 1 <= int(answer) <= len(names):
+            return names[int(answer) - 1]
+        out(f"Choose 1-{len(names)}.")
+
+
+def render_summary(
+    service: str,
+    values: Mapping[str, str],
+    *,
+    config_path: Path,
+    profile_name: str,
+    harness: str | None,
+    scope: str,
+) -> str:
+    """The pre-flight confirmation: everything about to be written, secrets
+    masked with a fixed-length ``****`` (no length leak)."""
+    lines = [f"Service: {service}"]
+    for key, value in values.items():
+        masked = key.endswith(CREDENTIAL_SUFFIXES)
+        lines.append(f"{key}: {mask(value) if masked else value}")
+    lines.append(f"Config: {config_path}")
+    lines.append(f"Profile: {profile_name}")
+    lines.append(f"Scope: {scope}")
+    lines.append(f"hook: {harness if harness is not None else 'skipped'}")
+    return "\n".join(lines)

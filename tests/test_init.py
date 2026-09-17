@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from mcp_atlassian_cli.config import ConfigError
+from mcp_atlassian_cli import init
 from mcp_atlassian_cli.init import (
     SERVICES,
     config_target_path,
@@ -250,3 +251,175 @@ def test_config_target_path_matrix(tmp_path: Path) -> None:
         )
     with pytest.raises(ConfigError, match="scope"):
         config_target_path("bogus", environ={}, home=home, cwd=cwd)
+
+
+class ScriptedPrompt:
+    """Prompt double: pops scripted answers in order, records prompts.
+
+    Entries are ``(kind, answer)`` with kind ``"ask"``/``"secret"``; an
+    empty answer string stands for "user pressed Enter" — default
+    interpretation lives in the wizard functions, not the prompt.
+    """
+
+    def __init__(self, script: list[tuple[str, str]]) -> None:
+        self.script = list(script)
+        self.prompts: list[str] = []
+
+    def _pop(self, kind: str) -> str:
+        if not self.script:
+            raise AssertionError(f"script exhausted; unexpected {kind} prompt")
+        expected, answer = self.script.pop(0)
+        assert expected == kind, f"expected {expected} prompt, got {kind}"
+        return answer
+
+    def ask(self, prompt: str, *, default: str | None = None) -> str:
+        self.prompts.append(prompt)
+        return self._pop("ask")
+
+    def ask_secret(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        return self._pop("secret")
+
+
+class Recorder:
+    """Collects wizard out() lines for assertions."""
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def __call__(self, line: str) -> None:
+        self.lines.append(line)
+
+
+def test_collect_profile_cloud_happy() -> None:
+    prompt = ScriptedPrompt(
+        [
+            ("ask", "https://work.atlassian.net"),
+            ("ask", "1"),
+            ("ask", "you@work.com"),
+            ("secret", "tok-123"),
+            ("ask", ""),
+        ]
+    )
+
+    values = init.collect_profile("jira", prompt, out=Recorder())
+
+    assert values == {
+        "JIRA_URL": "https://work.atlassian.net",
+        "JIRA_USERNAME": "you@work.com",
+        "JIRA_API_TOKEN": "tok-123",
+    }
+
+
+def test_collect_profile_dc_and_ssl_off() -> None:
+    prompt = ScriptedPrompt(
+        [
+            ("ask", "https://confluence.internal/wiki"),
+            ("ask", "2"),
+            ("secret", "pat-token"),
+            ("ask", "n"),
+        ]
+    )
+
+    values = init.collect_profile("confluence", prompt, out=Recorder())
+
+    assert values == {
+        "CONFLUENCE_URL": "https://confluence.internal/wiki",
+        "CONFLUENCE_PERSONAL_TOKEN": "pat-token",
+        "CONFLUENCE_SSL_VERIFY": "false",
+    }
+
+
+def test_collect_profile_url_default_bitbucket() -> None:
+    prompt = ScriptedPrompt(
+        [
+            ("ask", ""),  # Enter accepts https://bitbucket.org
+            ("ask", "1"),
+            ("ask", "you"),
+            ("secret", "bb-token"),
+            ("ask", "y"),
+        ]
+    )
+
+    values = init.collect_profile("bitbucket", prompt, out=Recorder())
+
+    assert values["BITBUCKET_URL"] == "https://bitbucket.org"
+    assert values["BITBUCKET_USERNAME"] == "you"
+    assert values["BITBUCKET_API_TOKEN"] == "bb-token"
+
+
+def test_collect_profile_reprompts() -> None:
+    out = Recorder()
+    prompt = ScriptedPrompt(
+        [
+            ("ask", "not-a-url"),
+            ("ask", "https://jira.example.com"),
+            ("ask", "1"),
+            ("ask", "you@work.com"),
+            ("secret", ""),  # empty secret re-prompts
+            ("secret", "токен"),  # non-latin-1 re-prompts
+            ("secret", "tok"),
+            ("ask", ""),
+        ]
+    )
+
+    values = init.collect_profile("jira", prompt, out=out)
+
+    assert values["JIRA_API_TOKEN"] == "tok"
+    joined = "\n".join(out.lines)
+    assert "http" in joined  # URL validation error surfaced
+    assert "latin-1" in joined  # credential validation error surfaced
+
+
+def test_choose_scope() -> None:
+    assert init.choose_scope(ScriptedPrompt([("ask", "")])) == "global"
+    assert init.choose_scope(ScriptedPrompt([("ask", "2")])) == "project"
+
+
+def test_choose_profile_name() -> None:
+    assert init.choose_profile_name("jira", ScriptedPrompt([("ask", "")])) == "jira"
+    assert (
+        init.choose_profile_name("jira", ScriptedPrompt([("ask", "a.b"), ("ask", "work")]))
+        == "work"
+    )
+
+
+def test_choose_harness(tmp_path: Path) -> None:
+    empty_home = tmp_path / "empty"
+    empty_home.mkdir()
+    assert init.choose_harness(ScriptedPrompt([("ask", "")]), empty_home) == "claude"
+    assert init.choose_harness(ScriptedPrompt([("ask", "s")]), empty_home) is None
+    assert init.choose_harness(ScriptedPrompt([("ask", "9"), ("ask", "1")]), empty_home) == "claude"
+
+    qwen_home = tmp_path / "qwen"
+    (qwen_home / ".qwen").mkdir(parents=True)
+    assert init.choose_harness(ScriptedPrompt([("ask", "")]), qwen_home) == "qwen"
+
+
+def test_choose_service() -> None:
+    assert init.choose_service(ScriptedPrompt([("ask", "2")])) == "confluence"
+    assert init.choose_service(ScriptedPrompt([("ask", "7"), ("ask", "3")])) == "bitbucket"
+
+
+def test_render_summary_masks_credentials() -> None:
+    summary = init.render_summary(
+        "jira",
+        {
+            "JIRA_URL": "https://work.atlassian.net",
+            "JIRA_USERNAME": "you@work.com",
+            "JIRA_API_TOKEN": "tok",
+        },
+        config_path=Path("/tmp/x/.atli.toml"),
+        profile_name="jira",
+        harness=None,
+        scope="project",
+    )
+
+    assert "https://work.atlassian.net" in summary
+    assert "JIRA_USERNAME: ****" in summary
+    assert "JIRA_API_TOKEN: ****" in summary
+    assert "tok" not in summary
+    assert "hook: skipped" in summary
+    assert "/tmp/x/.atli.toml" in summary
+    assert "jira" in summary
+    assert "project" in summary
