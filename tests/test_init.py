@@ -1033,6 +1033,10 @@ def test_console_prompt_dispatches_on_tty_and_term(
 ) -> None:
     from mcp_atlassian_cli.init import InquirerPrompt, PlainPrompt, console_prompt
 
+    # The TERM rows below test the POSIX dispatch; on Windows the platform
+    # exemption bypasses TERM entirely (covered by its own test below).
+    monkeypatch.setattr(sys, "platform", "darwin")
+
     class _FakeStream:
         def __init__(self, tty: bool) -> None:
             self._tty = tty
@@ -1292,6 +1296,7 @@ def _drive_pty(args: list[str], keys: list[str], timeout: float = 25.0) -> tuple
     return proc.returncode, snapshot().decode(errors="replace")
 
 
+@_pty_only
 def test_pty_smoke_happy_path(tmp_path: Path) -> None:
     child = tmp_path / "smoke_child.py"
     child.write_text(_SMOKE_CHILD, encoding="utf-8")
