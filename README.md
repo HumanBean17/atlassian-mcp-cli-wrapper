@@ -77,11 +77,17 @@ One command takes you from install to a verified setup:
 $ atli init jira        # or confluence / bitbucket; bare `atli init` shows a menu
 ```
 
-The wizard asks for the service URL, Cloud or Data Center/Server
-credentials (tokens are entered hidden and validated as you type), whether
-to verify TLS certificates (answer **n** behind a corporate proxy with a
-self-signed CA), where to store everything, the profile name, and which
-harness to prime:
+In a terminal the wizard is fully interactive — arrow-key menus with a
+pointer, Enter to accept the highlighted or prefilled answer, values
+validated as you type (URL shape, latin-1-safe credentials), tokens entered
+hidden. When stdin is not a terminal (piped input, an agent driving atli
+via Bash), the same flow falls back to numbered text prompts that read one
+answer per line.
+
+The wizard asks where to store everything and the profile name first, then
+the service URL, Cloud or Data Center/Server credentials, and whether to
+verify TLS certificates (answer **No** behind a corporate proxy with a
+self-signed CA), and finally which harness to prime:
 
 - **Scope** — `global` (default) writes `~/.config/atli/config.toml` plus
   the home-level harness settings; `project` writes `./.atli.toml` plus the
@@ -93,11 +99,18 @@ harness to prime:
   The SessionStart hook merges idempotently — existing settings are never
   clobbered.
 
-Before anything is written, the wizard verifies the setup with one cheap
-read-only call (a limit-1 search or repo list). On failure you re-enter or
-abort with nothing written. The profile merges into an existing config
-surgically — comments and other profiles survive byte-for-byte — and the
-file is `chmod 600` afterwards.
+Re-running `atli init jira` on an existing profile is an editor, not a
+re-typing exercise: the URL, username, and auth method prefill from the
+profile (Enter keeps them), a stored token is kept by pressing Enter at the
+hidden prompt, and the TLS answer defaults to the stored one.
+
+The live verification runs **before** the final summary: one cheap
+read-only call (a limit-1 search or repo list) proves URL + credentials +
+TLS; on failure you re-enter credentials, change the URL, or abort — with
+nothing written. The confirmation summary then reads "Verified: yes", so
+confirming means writing. The profile merges into an existing config
+comment-preservingly (tomlkit round-trip) — and the file is `chmod 600`
+afterwards.
 
 Hand-written profiles (next section) remain the power-user path — that is
 where mTLS (`*_CLIENT_CERT`) and OAuth setups live.

@@ -1,5 +1,7 @@
 """Tests for profile config discovery, env application, and argv pre-parse."""
 
+import tomllib
+
 import pytest
 
 from conftest import isolate_home
@@ -12,6 +14,7 @@ from mcp_atlassian_cli.config import (
     find_config_file,
     load_config,
     resolve_profile_name,
+    upsert_profile,
     validate_credentials,
 )
 
@@ -413,3 +416,186 @@ def load_config_from_text(tmp_path, text: str):
     file = tmp_path / "config.toml"
     file.write_text(text)
     return load_config(file)
+
+
+# --- upsert_profile: the tomlkit-backed write half of the config format ----
+
+
+def test_upsert_appends_new_profile_preserving_everything():
+    text = (
+        "# my config\n"
+        'default_profile = "other"\n'
+        "\n"
+        "[profiles.other]\n"
+        'JIRA_URL = "https://old.example.com"  # inline comment\n'
+        'TOOLSETS = "all"\n'
+    )
+
+    result = upsert_profile(
+        text, "work", {"JIRA_URL": "https://new.example.com", "JIRA_API_TOKEN": "tok"}
+    )
+
+    for original_line in (
+        "# my config",
+        'default_profile = "other"',
+        "[profiles.other]",
+        'JIRA_URL = "https://old.example.com"  # inline comment',
+        'TOOLSETS = "all"',
+    ):
+        assert original_line in result
+    data = tomllib.loads(result)
+    assert data["profiles"]["work"] == {
+        "JIRA_URL": "https://new.example.com",
+        "JIRA_API_TOKEN": "tok",
+    }
+    assert data["profiles"]["other"]["JIRA_URL"] == "https://old.example.com"
+    assert data["default_profile"] == "other"  # existing default never changed
+
+
+def test_upsert_updates_existing_key_in_place_keeping_comments():
+    text = (
+        "[profiles.work]\n"
+        'JIRA_URL = "https://old.example.com"  # keep me\n'
+        'TOOLSETS = "all"\n'
+        "\n"
+        "# note about prod\n"
+        "[profiles.prod]\n"
+        'JIRA_URL = "https://prod.example.com"\n'
+    )
+
+    result = upsert_profile(text, "work", {"JIRA_URL": "https://new.example.com"})
+
+    assert "# keep me" in result  # the replaced line keeps its comment
+    assert "# note about prod" in result
+    data = tomllib.loads(result)
+    assert data["profiles"]["work"] == {
+        "JIRA_URL": "https://new.example.com",
+        "TOOLSETS": "all",
+    }
+    assert data["profiles"]["prod"]["JIRA_URL"] == "https://prod.example.com"
+
+
+def test_upsert_adds_missing_keys_to_existing_section():
+    text = '[profiles.work]\nJIRA_URL = "https://x.example.com"\n\n[profiles.dc]\nK = "v"\n'
+
+    result = upsert_profile(
+        text,
+        "work",
+        {"JIRA_URL": "https://x.example.com", "JIRA_USERNAME": "a@b.c", "JIRA_API_TOKEN": "t"},
+    )
+
+    data = tomllib.loads(result)
+    assert data["profiles"]["work"] == {
+        "JIRA_URL": "https://x.example.com",
+        "JIRA_USERNAME": "a@b.c",
+        "JIRA_API_TOKEN": "t",
+    }
+    assert data["profiles"]["dc"] == {"K": "v"}
+
+
+def test_upsert_drops_superseded_keys():
+    """Re-running the wizard with different answers must not leave the old
+    answers behind (a stale SSL_VERIFY=false would downgrade TLS; old
+    Cloud credentials would ride next to a personal token)."""
+    seeded = (
+        "[profiles.work]\n"
+        'JIRA_URL = "https://x.example.com"\n'
+        'JIRA_USERNAME = "you@x.com"\n'
+        'JIRA_API_TOKEN = "old"\n'
+        'JIRA_SSL_VERIFY = "false"\n'
+    )
+
+    result = upsert_profile(
+        seeded,
+        "work",
+        {"JIRA_URL": "https://x.example.com", "JIRA_PERSONAL_TOKEN": "pat"},
+        drop={"JIRA_USERNAME", "JIRA_API_TOKEN", "JIRA_SSL_VERIFY"},
+    )
+
+    profile = tomllib.loads(result)["profiles"]["work"]
+    assert profile == {
+        "JIRA_URL": "https://x.example.com",
+        "JIRA_PERSONAL_TOKEN": "pat",
+    }
+
+
+def test_upsert_into_empty_text():
+    result = upsert_profile("", "work", {"JIRA_URL": "https://x.example.com"})
+
+    data = tomllib.loads(result)
+    assert data["profiles"]["work"]["JIRA_URL"] == "https://x.example.com"
+    assert data["default_profile"] == "work"
+    assert result.endswith("\n")
+
+
+def test_upsert_escapes_values():
+    tricky = 'quo"te\\back\nline'
+
+    result = upsert_profile("", "work", {"JIRA_PERSONAL_TOKEN": tricky})
+
+    assert tomllib.loads(result)["profiles"]["work"]["JIRA_PERSONAL_TOKEN"] == tricky
+
+
+def test_upsert_handles_exotic_profile_names_and_multiline_strings():
+    """The cases the old line-surgery refused (quoted keys, multi-line
+    string values) are ordinary edits for tomlkit."""
+    text = (
+        '[profiles."weird name"]\n'
+        'K = """\n'
+        "multi\n"
+        'line\n"""\n'
+    )
+
+    result = upsert_profile(text, "weird name", {"JIRA_URL": "https://x"})
+
+    data = tomllib.loads(result)
+    assert data["profiles"]["weird name"]["JIRA_URL"] == "https://x"
+    assert data["profiles"]["weird name"]["K"] == "multi\nline\n"
+
+
+def test_upsert_default_profile_insertion():
+    # absent -> set, before the first table so it stays top-level
+    result = upsert_profile("# top comment\n\n[profiles.x]\nK = \"v\"\n", "x", {"K": "v"})
+    data = tomllib.loads(result)
+    assert data["default_profile"] == "x"
+    assert result.index("# top comment") < result.index('default_profile = "x"')
+    assert result.index('default_profile = "x"') < result.index("[profiles.x]")
+    # present with a different value -> never changed
+    text = 'default_profile = "dc"\n\n[profiles.dc]\nK = "v"\n'
+    assert upsert_profile(text, "work", {"K": "v"}) == text.replace(
+        '[profiles.dc]\nK = "v"', '[profiles.dc]\nK = "v"\n\n[profiles.work]\nK = "v"'
+    )
+    # set_default=False leaves a missing default alone
+    result = upsert_profile("[profiles.x]\nK = \"v\"\n", "x", {"K": "v"}, set_default=False)
+    assert "default_profile" not in tomllib.loads(result)
+
+
+def test_upsert_refuses_unparseable_input():
+    with pytest.raises(ConfigError, match="Could not parse"):
+        upsert_profile("this is [ not toml", "work", {"K": "v"})
+
+
+def test_upsert_refuses_non_table_profiles():
+    with pytest.raises(ConfigError, match="profiles"):
+        upsert_profile('profiles = "oops"\n', "work", {"K": "v"})
+    with pytest.raises(ConfigError, match="profile 'work' must be a"):
+        upsert_profile("[profiles]\nwork = \"oops\"\n", "work", {"K": "v"})
+
+
+def test_upsert_guard_refuses_non_roundtripping_output(monkeypatch):
+    """If tomlkit ever emitted text that tomllib cannot parse (or that
+    dropped the requested values), upsert must refuse, not return it."""
+    import mcp_atlassian_cli.config as config_mod
+
+    real_dumps = config_mod.tomlkit.dumps  # before any patching
+
+    monkeypatch.setattr(config_mod.tomlkit, "dumps", lambda doc: "garbage = [")
+    with pytest.raises(ConfigError, match="Refusing to write"):
+        upsert_profile("", "work", {"K": "v"})
+
+    def losing_dumps(doc):
+        return real_dumps(doc).replace('K = "v"', 'K = "changed"')
+
+    monkeypatch.setattr(config_mod.tomlkit, "dumps", losing_dumps)
+    with pytest.raises(ConfigError, match="does not carry exactly"):
+        upsert_profile("", "work", {"K": "v"})

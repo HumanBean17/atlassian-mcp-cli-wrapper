@@ -236,3 +236,45 @@ resolve to installs instead of silence or the unsupported note.
 - **AGENTS.md** — one bullet: `atli init <service>` interactively creates a
   verified profile and installs the SessionStart hook (claude / codex /
   qwen / gigacode).
+
+## Revision 2026-09-20: interactive prompts + tomlkit
+
+The shipped wizard's prompting was plain `input()` with numbered text
+menus — functional, but users had to type choice numbers with the cursor
+parked at a bare prompt. This revision rebuilds the prompting layer and the
+config write path:
+
+- **Prompt protocol** (`init.Prompt`): `select` / `text` / `secret` /
+  `confirm`, scripted in tests without a terminal. Two adapters implement
+  it: `InquirerPrompt` (arrow-key selects with a pointer, live validation,
+  hidden secrets — InquirerPy on prompt_toolkit) for a real terminal with
+  a smart `TERM`, and `PlainPrompt` (the old numbered-text UX, getpass
+  secrets) for piped stdin or `TERM=dumb` (prompt_toolkit's dumb-terminal
+  fallback renders secrets in clear text — the dispatch refuses it).
+  `inquirer.confirm` is not used: its Enter binding submits the empty
+  buffer on current prompt_toolkit, so confirm is a two-choice select.
+- **tomlkit replaces the TOML line surgery**: `config.upsert_profile`
+  round-trips the document (comments, key order, and other tables survive),
+  drops superseded wizard-owned keys, sets `default_profile` only when
+  absent, and parse-guards the result before it is returned. The cases the
+  line surgery refused (quoted profile names, multi-line strings) are now
+  ordinary edits.
+- **Prefill**: scope and profile name are asked first (they decide the
+  file); an existing profile prefills the URL/auth/username prompts and the
+  TLS default, and an empty secret keeps the stored token — re-running
+  init edits the profile.
+- **Verify before summary**: the live read-only call runs before the
+  confirmation summary, which states "Verified: yes" — confirm is a pure
+  write decision. Recovery (re-enter / change URL / abort) is a select.
+- **Summary fixes**: usernames show as entered (only values collected
+  hidden mask as `****`); labels normalized.
+- **Dispatch bug fixed**: `create_init_app`'s bare menu built two prompt
+  instances (one for the service pick, one inside the wizard) — stateful
+  prompts desynced; one instance now threads through both.
+- **Testing**: wizard logic tests script the new protocol; TOML merge tests
+  target `config.upsert_profile` (exotic-name cases assert success now);
+  pty smoke tests drive the real InquirerPy adapter with keypresses
+  (POSIX-only; the driver drains the pty continuously, answers
+  prompt_toolkit's cursor-position query, sets a real window size and
+  `TERM`, and asserts the typed secret never appears in the transcript).
+- New base dependencies: `InquirerPy>=0.3.4,<0.4`, `tomlkit>=0.13,<1`.

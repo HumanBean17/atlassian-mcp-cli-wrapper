@@ -894,19 +894,19 @@ def test_root_help_lists_init(capsys: pytest.CaptureFixture[str]) -> None:
     assert "Interactively configure" in capsys.readouterr().out
 
 
-def _decline_script(service: str) -> list[tuple[str, str]]:
-    """A full wizard pass that declines at the confirm prompt."""
-    url_answer = "" if service == "bitbucket" else f"https://{service}.example.com"
+def _decline_script(service: str) -> list[tuple[str, Any]]:
+    """A full wizard pass that declines at the write-confirm prompt."""
+    url_answer = "https://bitbucket.org" if service == "bitbucket" else f"https://{service}.example.com"
     return [
-        ("ask", url_answer),
-        ("ask", "1"),
-        ("ask", "you@work.com"),
-        ("secret", "tok"),
-        ("ask", ""),  # TLS
-        ("ask", ""),  # scope: global
-        ("ask", ""),  # profile name default
-        ("ask", "1"),  # harness: claude
-        ("ask", "n"),  # decline
+        ("select", "global"),  # scope
+        ("text", service),  # profile name (default)
+        ("text", url_answer),  # URL
+        ("select", "0"),  # auth: Cloud
+        ("text", "you@work.com"),  # username
+        ("secret", "tok"),  # api token
+        ("confirm", True),  # TLS
+        ("select", "claude"),  # harness
+        ("confirm", False),  # decline the write
     ]
 
 
@@ -935,7 +935,7 @@ def test_init_app_bare_menu_chooses_service(
     # Confluence, not bitbucket: menu routing is what is under test, and
     # bitbucket would (correctly) hit the provider gate on the [atlassian]
     # CI legs and exit 2 there.
-    script = [("ask", "2")] + _decline_script("confluence")
+    script = [("select", "confluence")] + _decline_script("confluence")
     app = create_init_app(
         {},
         home=tmp_path / "home",
@@ -956,9 +956,8 @@ def test_init_app_exit_code_propagates(
 ) -> None:
     from mcp_atlassian_cli.runner import ToolCallFailure
 
-    script = _decline_script("jira")
-    script[-1] = ("ask", "")  # confirm
-    script.append(("ask", "3"))  # verification failed -> abort
+    script = _decline_script("jira")[:7]  # through the TLS answer
+    script.append(("select", "abort"))  # verification failed -> abort
     app = create_init_app(
         {},
         home=tmp_path / "home",

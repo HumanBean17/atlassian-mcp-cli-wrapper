@@ -914,15 +914,23 @@ def test_main_init_bitbucket_provider_gate_exit_2(
 
 
 class _BailingPrompt:
-    """A console prompt whose first question raises (Ctrl-C / Ctrl-D)."""
+    """A prompt whose first question raises (Ctrl-C / Ctrl-D)."""
 
     def __init__(self, error: BaseException) -> None:
         self._error = error
 
-    def ask(self, prompt: str, *, default: str | None = None) -> str:
+    def select(self, message: str, choices: object, *, default: str | None = None,
+               instruction: str | None = None) -> str:
         raise self._error
 
-    def ask_secret(self, prompt: str) -> str:
+    def text(self, message: str, *, default: str | None = None,
+             validate: object = None) -> str:
+        raise self._error
+
+    def secret(self, message: str, *, validate: object = None) -> str:
+        raise self._error
+
+    def confirm(self, message: str, *, default: bool = True) -> bool:
         raise self._error
 
 

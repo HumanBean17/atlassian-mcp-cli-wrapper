@@ -12,9 +12,13 @@ from __future__ import annotations
 
 import os
 import tomllib
-from collections.abc import Mapping, MutableMapping
+from collections.abc import Collection, Mapping, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
+
+import tomlkit
+from tomlkit.exceptions import TOMLKitError
+from tomlkit.items import Table
 
 SERVICE_ENV_PREFIXES: tuple[str, ...] = (
     "JIRA_",
@@ -168,6 +172,94 @@ def _coerce_value(path: Path, profile: str, key: str, value: object) -> str:
         f"type {type(value).__name__}; only strings, integers, floats, and "
         "booleans are allowed."
     )
+
+
+def upsert_profile(
+    text: str,
+    profile_name: str,
+    values: Mapping[str, str],
+    drop: Collection[str] = (),
+    *,
+    set_default: bool = True,
+) -> str:
+    """Merge ``values`` into ``[profiles.<profile_name>]`` of ``text`` and
+    return the new text — the write half of the config format this module owns.
+
+    tomlkit round-trips the document, so comments, key order, whitespace, and
+    every other table survive byte-identical outside the edited section.
+    Keys in ``drop`` are removed from the section first (every occurrence):
+    re-running the wizard with different answers must not leave superseded
+    state behind. ``set_default`` writes ``default_profile = "<name>"`` only
+    when the key is absent — silently re-pointing someone's default profile
+    is exactly the kind of surprise a merge must not cause. A missing
+    section (or missing ``profiles`` table) is created.
+
+    Guard: the serialized result is parse-checked with ``tomllib`` and must
+    carry exactly the requested values before it is returned — any mismatch
+    is a library-level surprise, surfaced as :class:`ConfigError` rather
+    than ever reaching a file. One deliberate refusal remains: ``profiles``
+    (or the target section) written as an INLINE table
+    (``profiles = { … }``) is rejected — ``load_config`` accepts that form,
+    but editing inline tables is not supported; convert to
+    ``[profiles.<name>]`` headers to let the wizard merge.
+    """
+    try:
+        doc = tomlkit.parse(text)
+    except TOMLKitError as error:
+        raise ConfigError(
+            f"Could not parse the existing config as TOML: {error}. "
+            "Fix or remove the file, then re-run init."
+        ) from error
+
+    profiles = doc.get("profiles")
+    if profiles is None:
+        profiles = tomlkit.table()
+        doc["profiles"] = profiles
+    if not isinstance(profiles, Table):
+        raise ConfigError(
+            "Invalid config file: 'profiles' must be a table of "
+            "[profiles.<name>] tables."
+        )
+
+    section = profiles.get(profile_name)
+    if section is None:
+        section = tomlkit.table()
+        profiles[profile_name] = section
+    if not isinstance(section, Table):
+        raise ConfigError(
+            f"Invalid config file: profile '{profile_name}' must be a "
+            f"[profiles.{profile_name}] table."
+        )
+
+    for key in drop:
+        section.pop(key, None)
+    for key, value in values.items():
+        section[key] = value
+
+    if set_default and "default_profile" not in doc:
+        doc["default_profile"] = profile_name
+
+    merged = tomlkit.dumps(doc)
+    try:
+        parsed = tomllib.loads(merged)
+    except tomllib.TOMLDecodeError as error:
+        raise ConfigError(
+            f"Refusing to write: the merged config does not parse ({error!r}). "
+            "Your file is unchanged — please report this as an atli bug."
+        ) from error
+    written = parsed.get("profiles", {}).get(profile_name, {})
+    if any(written.get(key) != value for key, value in values.items()):
+        raise ConfigError(
+            "Refusing to write: the merged profile does not carry exactly "
+            "the collected values. Your file is unchanged — please report "
+            "this as an atli bug."
+        )
+    if any(key in written for key in drop):
+        raise ConfigError(
+            "Refusing to write: superseded keys survived the merge. "
+            "Your file is unchanged — please report this as an atli bug."
+        )
+    return merged
 
 
 def resolve_profile_name(

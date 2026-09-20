@@ -283,15 +283,19 @@ def create_init_app(
     defaults it to True, which would swallow a wizard Ctrl-C into
     ``SystemExit(130)`` before main's KeyboardInterrupt handler — the
     clean-abort contract — could see it). ``prompt_factory`` resolves at
-    call time so tests can monkeypatch ``init.console_prompt``.
+    call time so tests can monkeypatch ``init.console_prompt``; the bare
+    menu resolves ONE prompt instance and threads it through the service
+    pick into the wizard (two instances would desync any stateful prompt).
     """
 
-    def run(service: str) -> None:
-        factory = prompt_factory or init_mod.console_prompt
+    def run(service: str, prompt: init_mod.Prompt | None = None) -> None:
+        if prompt is None:
+            factory = prompt_factory or init_mod.console_prompt
+            prompt = factory()
         raise SystemExit(
             init_mod.run_init(
                 service,
-                prompt=factory(),
+                prompt=prompt,
                 home=home,
                 cwd=cwd,
                 environ=environ,
@@ -314,7 +318,8 @@ def create_init_app(
     def menu() -> None:
         """Pick a service interactively, then run its wizard."""
         factory = prompt_factory or init_mod.console_prompt
-        run(init_mod.choose_service(factory()))
+        prompt = factory()
+        run(init_mod.choose_service(prompt), prompt=prompt)
 
     init_app = cyclopts.App(
         name="init",

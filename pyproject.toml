@@ -15,6 +15,13 @@ dependencies = [
     # and the marker variant shipped broken. The provider comes from an extra:
     # [atlassian] = upstream (Jira+Confluence), [bitbucket] = the fork.
     "cyclopts>=4.22,<5",
+    # Interactive prompts for `atli init` (arrow-key selects; dormant but
+    # stable — the wizard's prompt surface is small and empirically verified
+    # against prompt_toolkit 3.0.x in the pty smoke tests).
+    "InquirerPy>=0.3.4,<0.4",
+    # Round-trip TOML editing for `atli init`: parses, mutates, and re-serializes
+    # the user's config while preserving comments and key order.
+    "tomlkit>=0.13,<1",
 ]
 
 [project.optional-dependencies]
