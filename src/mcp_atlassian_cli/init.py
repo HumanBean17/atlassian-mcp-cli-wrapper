@@ -4,18 +4,21 @@ Pure decision and I/O logic in the :mod:`mcp_atlassian_cli.prime`
 discipline: this module imports nothing that reaches the server stack —
 the single exception is the lazy ``ToolRunner`` import inside
 :func:`verify_profile`, which the wizard pays only at the live-verification
-step. All prompting goes through the injectable :class:`Prompt` protocol so
-tests script the conversation instead of driving a TTY.
+step. All prompting goes through the injectable :class:`Prompt` protocol
+(``select`` / ``text`` / ``secret`` / ``confirm``) so tests script the
+conversation instead of driving a TTY; production uses the InquirerPy-backed
+adapter on a terminal and the plain-text adapter when stdin is piped (agents
+driving atli via Bash keep working).
 """
 
 from __future__ import annotations
 
-import json
 import os
 import re
+import sys
 import tomllib
 from tomllib import TOMLDecodeError
-from collections.abc import Callable, Collection, Mapping, MutableMapping
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from getpass import getpass
 from pathlib import Path
@@ -24,9 +27,9 @@ from urllib.parse import urlsplit
 
 from mcp_atlassian_cli import providers
 from mcp_atlassian_cli.config import (
-    CREDENTIAL_SUFFIXES,
     ConfigError,
     apply_profile,
+    upsert_profile,
     validate_credentials,
 )
 
@@ -192,154 +195,269 @@ def validate_profile_name(name: str) -> str | None:
     return None
 
 
-def toml_basic_string(value: str) -> str:
-    """Serialize ``value`` as a TOML basic string (double quotes).
+def _credential_validator(env_name: str) -> Callable[[str], str | None]:
+    """The per-variable prompt validator: required + latin-1-safe.
 
-    Uses the JSON-compatible escape set, which is exactly the escape set a
-    TOML basic string accepts for the characters that need escaping
-    (``\"``, ``\\\\``, control characters) — with one patch: DEL (U+007F)
-    is raw in JSON but rejected by tomllib inside a basic string, so it is
-    escaped explicitly. Everything else — including any unicode — passes
-    through raw.
+    Every collected value is header-bound (Basic-auth usernames included),
+    so every value gets the latin-1 entry check — the cryptic ``http.client``
+    failure must never survive the prompt. :func:`validate_credentials` is
+    the same rule runtime enforces; its message names the offending
+    character.
     """
-    return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
+
+    def check(text: str) -> str | None:
+        if not text:
+            return "Value is required."
+        try:
+            validate_credentials({env_name: text})
+        except ConfigError as error:
+            return str(error)
+        return None
+
+    return check
 
 
-def mask(value: str) -> str:
-    """A fixed-length mask; never echoes secret length back to the console."""
-    return "****"
+@runtime_checkable
+class Prompt(Protocol):
+    """The wizard's conversation surface; injectable for tests.
 
-
-def _is_table_header(line: str) -> bool:
-    """True when ``line`` opens a TOML table (``[x]``) or array of tables."""
-    return line.lstrip().startswith("[")
-
-
-def _assignment_line(line: str, key: str) -> bool:
-    """True when ``line`` assigns ``key`` (``KEY = "value"`` shape, tolerating
-    leading spaces and spaces around ``=``; an inline comment may follow)."""
-    stripped = line.strip()
-    if not stripped.startswith(key):
-        return False
-    return stripped[len(key):].lstrip().startswith("=")
-
-
-def merge_profile_text(
-    text: str,
-    profile_name: str,
-    values: Mapping[str, str],
-    drop: Collection[str] = (),
-) -> str:
-    """Merge ``values`` into the ``[profiles.<profile_name>]`` table of ``text``.
-
-    Surgical by design — the same merge-never-clobber discipline the hook
-    installer applies to harness settings: only the target section's key
-    lines change (first occurrence of each key replaced wholesale, missing
-    keys appended at section end); comments, key order, and every other
-    table survive byte-identical. No section yet: the table appends at EOF
-    behind a blank separator. ``drop`` names wizard-owned keys whose
-    assignments are removed from the section first (every occurrence) —
-    re-running the wizard with different answers must not leave the
-    superseded answers behind (e.g. a TLS "verify" answer after a previous
-    "no", or Cloud credentials after a switch to a personal token).
-
-    Line surgery is exact for the config file atli reads and writes —
-    flat ``KEY = "value"`` tables — but it is still a line scan: a
-    hand-written multi-line string (``\"\"\"…\"\"\"``) or quoted key in the
-    target section is not understood (:func:`run_init`'s write-phase parse
-    guard turns any resulting surprise into a clean refusal, never a
-    corrupted file).
+    ``select`` presents (value, label) choices and returns the chosen
+    value; ``text`` returns the effective answer (the default when the
+    user accepts it); ``secret`` never echoes and cannot prefill — the
+    caller decides what an empty answer means; ``confirm`` returns a bool.
+    ``validate`` callables return ``None`` when the text is acceptable and
+    the reason string when it is not; both adapters re-prompt on a reason.
     """
-    lines = text.splitlines(keepends=True)
-    header = f"[profiles.{profile_name}]"
-    rendered = {key: f"{key} = {toml_basic_string(value)}\n" for key, value in values.items()}
 
-    header_index = next(
-        (
-            index
-            for index, line in enumerate(lines)
-            if _matches_header(line, header)
-        ),
-        None,
-    )
-    if header_index is None:
-        merged = list(lines)
-        if merged and not merged[-1].endswith("\n"):
-            merged[-1] += "\n"
-        if merged and not text.endswith("\n\n"):
-            merged.append("\n")
-        merged.append(header + "\n")
-        merged.extend(rendered.values())
-        return "".join(merged)
+    def select(
+        self,
+        message: str,
+        choices: Sequence[tuple[str, str]],
+        *,
+        default: str | None = None,
+        instruction: str | None = None,
+    ) -> str: ...
 
-    body_end = header_index + 1
-    while body_end < len(lines) and not _is_table_header(lines[body_end]):
-        body_end += 1
+    def text(
+        self,
+        message: str,
+        *,
+        default: str | None = None,
+        validate: Callable[[str], str | None] | None = None,
+    ) -> str: ...
 
-    body: list[str] = []
-    replaced: set[str] = set()
-    dropped: set[str] = set()
-    for line in lines[header_index + 1 : body_end]:
-        claimed = next(
-            (key for key in rendered if key not in replaced and _assignment_line(line, key)),
-            None,
+    def secret(
+        self,
+        message: str,
+        *,
+        validate: Callable[[str], str | None] | None = None,
+    ) -> str: ...
+
+    def confirm(self, message: str, *, default: bool = True) -> bool: ...
+
+
+def _prompt_toolkit_validator(
+    check: Callable[[str], str | None],
+) -> "object":
+    """Adapt a ``text -> reason | None`` callable to prompt_toolkit's
+    ``Validator`` (what InquirerPy's ``validate`` parameter wants)."""
+    from prompt_toolkit.document import Document
+    from prompt_toolkit.validation import ValidationError, Validator
+
+    class _Check(Validator):
+        def validate(self, document: Document) -> None:
+            reason = check(document.text)
+            if reason is not None:
+                raise ValidationError(
+                    message=reason, cursor_position=document.cursor_position
+                )
+
+    return _Check()
+
+
+class InquirerPrompt:
+    """The terminal :class:`Prompt`: InquirerPy arrow-key selects with a
+    pointer, live inline validation, hidden secrets.
+
+    InquirerPy (and prompt_toolkit beneath it) is imported lazily inside
+    each method so the piped/agent path and every scripted test pay nothing.
+    """
+
+    def _select(
+        self,
+        message: str,
+        choices: Sequence[tuple[str, str]],
+        *,
+        default: str | None,
+        instruction: str | None,
+    ):
+        from InquirerPy import inquirer
+        from InquirerPy.base.control import Choice
+
+        kwargs: dict[str, object] = {}
+        if default is not None:
+            kwargs["default"] = default
+        if instruction is not None:
+            kwargs["instruction"] = instruction
+        return inquirer.select(
+            message=message,
+            choices=[Choice(value=value, name=label) for value, label in choices],
+            **kwargs,
         )
-        if claimed is not None:
-            body.append(rendered[claimed])
-            replaced.add(claimed)
-            continue
-        obsolete = next(
-            (key for key in drop if key not in dropped and _assignment_line(line, key)),
-            None,
-        )
-        if obsolete is not None:
-            dropped.add(obsolete)
-            continue  # superseded wizard-owned key: the line goes away
-        body.append(line)
-    pending = [line_text for key, line_text in rendered.items() if key not in replaced]
-    if pending and body and not body[-1].endswith("\n"):
-        body[-1] += "\n"  # a hand-edited file may lack the final newline
-    updated = lines[: header_index + 1] + body + pending + lines[body_end:]
-    return "".join(updated)
+
+    def select(
+        self,
+        message: str,
+        choices: Sequence[tuple[str, str]],
+        *,
+        default: str | None = None,
+        instruction: str | None = None,
+    ) -> str:
+        return str(self._select(message, choices, default=default, instruction=instruction).execute())
+
+    def text(
+        self,
+        message: str,
+        *,
+        default: str | None = None,
+        validate: Callable[[str], str | None] | None = None,
+    ) -> str:
+        from InquirerPy import inquirer
+
+        kwargs: dict[str, object] = {}
+        if default is not None:
+            kwargs["default"] = default
+        if validate is not None:
+            kwargs["validate"] = _prompt_toolkit_validator(validate)
+        return str(inquirer.text(message=message, **kwargs).execute())
+
+    def secret(
+        self,
+        message: str,
+        *,
+        validate: Callable[[str], str | None] | None = None,
+    ) -> str:
+        from InquirerPy import inquirer
+
+        kwargs: dict[str, object] = {}
+        if validate is not None:
+            kwargs["validate"] = _prompt_toolkit_validator(validate)
+        return str(inquirer.secret(message=message, **kwargs).execute())
+
+    def confirm(self, message: str, *, default: bool = True) -> bool:
+        # Not inquirer.confirm: its Enter keybinding does not fire on
+        # current prompt_toolkit (Enter submits the empty buffer instead of
+        # the default), so confirm is a two-choice select — the same
+        # machinery the rest of the wizard uses and the pty smoke tests
+        # verify.
+        answer = self._select(
+            message, (("yes", "Yes"), ("no", "No")),
+            default="yes" if default else "no", instruction=None,
+        ).execute()
+        return answer == "yes"
 
 
-def _matches_header(line: str, header: str) -> bool:
-    """True when ``line`` is the ``header`` table header — leading
-    indentation, trailing spaces, and a trailing comment tolerated, every
-    form tomllib accepts (a missed match would append a duplicate table)."""
-    stripped = line.strip()
-    if stripped == header:
-        return True
-    return stripped.startswith(header) and stripped[len(header):][:1] in (" ", "\t", "#")
+class PlainPrompt:
+    """The non-TTY :class:`Prompt`: numbered menus and plain ``input``.
 
-
-def ensure_default_profile(text: str, profile_name: str) -> str:
-    """Set ``default_profile`` to ``profile_name`` unless one is already set.
-
-    The assignment inserts immediately before the first table header so it
-    stays top-level (a ``default_profile`` after a table header would belong
-    to that table); an existing assignment — any value — is never changed,
-    because silently re-pointing someone's default profile is exactly the
-    kind of surprise a merge must not cause.
+    The piped/agent path — answers are numbers or raw text on stdin, one
+    per line, in the spirit of the pre-interactive ``ConsolePrompt``
+    (differences: every choice is numbered — the old harness menu's ``s``
+    skip alias is now just another numbered choice — and validation
+    re-prompts with the reason printed via ``echo``).
     """
-    lines = text.splitlines(keepends=True)
-    first_table = next(
-        (index for index, line in enumerate(lines) if _is_table_header(line)),
-        len(lines),
-    )
-    already_set = any(
-        _assignment_line(line, "default_profile") for line in lines[:first_table]
-    )
-    if already_set:
-        return text
-    assignment = f"default_profile = {toml_basic_string(profile_name)}\n"
-    if first_table == len(lines):
-        merged = list(lines)
-        if merged and not merged[-1].endswith("\n"):
-            merged[-1] += "\n"
-        merged.append(assignment)
-        return "".join(merged)
-    return "".join(lines[:first_table] + [assignment] + lines[first_table:])
+
+    def __init__(self, echo: Callable[[str], None] = print) -> None:
+        self._echo = echo
+
+    def select(
+        self,
+        message: str,
+        choices: Sequence[tuple[str, str]],
+        *,
+        default: str | None = None,
+        instruction: str | None = None,
+    ) -> str:
+        if default is None:
+            default = choices[0][0]
+        lines = [message] if instruction is None else [message, instruction]
+        for number, (value, label) in enumerate(choices, start=1):
+            marker = " (default)" if value == default else ""
+            lines.append(f"{number}) {label}{marker}")
+        prompt_text = "\n".join(lines)
+        while True:
+            answer = input(f"{prompt_text}: ").strip()
+            if answer == "":
+                return default
+            # isdecimal, not isdigit: "²".isdigit() is True but int() rejects it
+            if answer.isdecimal() and 1 <= int(answer) <= len(choices):
+                return choices[int(answer) - 1][0]
+            self._echo(f"Choose 1-{len(choices)} (or press Enter for the default).")
+
+    def text(
+        self,
+        message: str,
+        *,
+        default: str | None = None,
+        validate: Callable[[str], str | None] | None = None,
+    ) -> str:
+        suffix = f" [{default}]" if default is not None else ""
+        while True:
+            answer = input(f"{message}{suffix}: ")
+            effective = default if (answer == "" and default is not None) else answer
+            if validate is None:
+                return effective
+            reason = validate(effective)
+            if reason is None:
+                return effective
+            self._echo(reason)
+
+    def secret(
+        self,
+        message: str,
+        *,
+        validate: Callable[[str], str | None] | None = None,
+    ) -> str:
+        while True:
+            answer = getpass(f"{message}: ")
+            if validate is None:
+                return answer
+            reason = validate(answer)
+            if reason is None:
+                return answer
+            self._echo(reason)
+
+    def confirm(self, message: str, *, default: bool = True) -> bool:
+        suffix = "[Y/n]" if default else "[y/N]"
+        while True:
+            answer = input(f"{message} {suffix}: ").strip().lower()
+            if answer == "":
+                return default
+            if answer in ("y", "yes"):
+                return True
+            if answer in ("n", "no"):
+                return False
+            self._echo("Please answer y or n.")
+
+
+def console_prompt() -> Prompt:
+    """The production prompt: InquirerPy on a real terminal, plain text
+    otherwise.
+
+    A TTY is necessary but not sufficient. ``TERM=dumb`` (CI contexts,
+    stripped environments) makes prompt_toolkit fall back to a rendering
+    path with no cursor addressing and, critically, no password masking:
+    a typed token would be shown in clear text. And InquirerPy renders to
+    stdout, so a redirected stdout (``atli init | tee``) hits the same
+    plain-text output class even with a TTY stdin — both streams must be
+    terminals. Windows is exempt from the TERM check: its consoles never
+    set TERM, and prompt_toolkit selects its Windows output backends on
+    the platform, not on TERM. Terminals that fail any check get the
+    plain adapter, whose secrets go through :func:`getpass` (echo-off at
+    the termios level) instead of terminal rendering."""
+    term_ok = sys.platform == "win32" or os.environ.get("TERM", "") not in ("", "dumb")
+    smart_terminal = sys.stdin.isatty() and sys.stdout.isatty() and term_ok
+    return InquirerPrompt() if smart_terminal else PlainPrompt()
 
 
 def write_config(path: Path, content: str) -> None:
@@ -349,14 +467,20 @@ def write_config(path: Path, content: str) -> None:
     clear bits, never set them), so the credentials never exist on disk
     with group/other read bits at any instant; the rename over the target
     is atomic, so a crash mid-write can only leave the pre-write file,
-    never a partial or exposed one.
+    never a partial or exposed one. A failure before the rename unlinks
+    the tmp file — owner-only already, but a stray credential-bearing
+    ``.tmp`` beside the config helps no one.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(path.name + ".tmp")
     descriptor = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(content)
-    os.replace(tmp_path, path)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
     path.chmod(0o600)
 
 
@@ -393,51 +517,48 @@ def config_target_path(
     raise ConfigError(f"Unknown scope '{scope}' — use 'project' or 'global'.")
 
 
-@runtime_checkable
-class Prompt(Protocol):
-    """The wizard's conversation surface; injectable for tests.
-
-    ``ask`` renders ``default`` inside the prompt text but returns the RAW
-    answer — an empty string means "pressed Enter", and interpreting it as
-    the default is the caller's job (one rule, one place).
-    """
-
-    def ask(self, prompt: str, *, default: str | None = None) -> str: ...
-
-    def ask_secret(self, prompt: str) -> str: ...
-
-
-class ConsolePrompt:
-    """The production :class:`Prompt`: ``input`` for plain answers,
-    ``getpass`` for secrets (never echoed, never in shell history)."""
-
-    def ask(self, prompt: str, *, default: str | None = None) -> str:
-        suffix = f" [{default}]" if default is not None else ""
-        return input(f"{prompt}{suffix}: ")
-
-    def ask_secret(self, prompt: str) -> str:
-        return getpass(f"{prompt}: ")
+def _secret_keys(service: str) -> set[str]:
+    """Env names collected hidden for ``service`` — the only values the
+    summary masks (a username typed in plain sight is confirmation
+    material, not a secret)."""
+    spec = SERVICES[service]
+    return {
+        variable.env_name
+        for method in spec.auth_methods
+        for variable in method.variables
+        if variable.secret
+    }
 
 
-def console_prompt() -> Prompt:
-    return ConsolePrompt()
+def detect_auth_method(spec: ServiceSpec, current: Mapping[str, str]) -> int:
+    """Index of the auth method whose variables the existing profile
+    already carries (all of them), else 0 (Cloud) — re-running init
+    preselects the shape the profile already uses."""
+    for index, method in enumerate(spec.auth_methods):
+        if all(variable.env_name in current for variable in method.variables):
+            return index
+    return 0
 
 
 def collect_profile(
     service: str,
     prompt: Prompt,
-    out: Callable[[str], None] = print,
     *,
+    current: Mapping[str, str] = {},
     keep_url: str | None = None,
 ) -> dict[str, str]:
-    """Wizard steps 1-3: URL, auth method + its variables, TLS choice.
+    """Collect URL, auth method + its variables, and the TLS choice.
 
-    ``keep_url`` skips the URL prompt (a credentials-only retry keeps the
-    URL the user already entered). Every answer is validated where it is
-    entered — URL shape, non-empty credentials, latin-1-safe header values
-    (:func:`mcp_atlassian_cli.config.validate_credentials` is the same rule
-    runtime enforces) — so a bad value re-prompts immediately with the
-    reason instead of surfacing as an HTTP error on first use.
+    ``current`` is the profile as it exists on disk (empty for a new
+    profile): non-secret prompts prefill from it (Enter keeps the value),
+    secrets offer "Enter to keep current", the auth method and TLS answer
+    preselect from it — re-running init edits the profile instead of
+    re-typing it. ``keep_url`` skips the URL prompt entirely (a
+    credentials-only retry keeps the URL just entered this session). Every
+    answer is validated where it is entered — URL shape, non-empty
+    credentials, latin-1-safe header values — so a bad value re-prompts
+    immediately with the reason instead of surfacing as an HTTP error on
+    first use.
     """
     spec = SERVICES[service]
     values: dict[str, str] = {}
@@ -445,136 +566,104 @@ def collect_profile(
     if keep_url is not None:
         values[spec.url_var] = keep_url
     else:
+        url_default = current.get(spec.url_var) or spec.url_default
         url_prompt = f"{service.title()} URL"
         if spec.url_hint:
             url_prompt += f" ({spec.url_hint})"
-        while True:
-            answer = prompt.ask(url_prompt, default=spec.url_default)
-            if spec.url_default is not None and answer == "":
-                answer = spec.url_default
-            answer = answer.strip()  # a pasted trailing space is a classic
-            error = validate_url(answer)
-            if error is None:
-                values[spec.url_var] = answer
-                break
-            out(error)
+        # strip inside the validator too, so a pasted trailing space is
+        # accepted in both adapters, not just after the fact
+        values[spec.url_var] = prompt.text(
+            url_prompt,
+            default=url_default,
+            validate=lambda text: validate_url(text.strip()),
+        ).strip()
 
-    menu = "\n".join(
-        f"{number}) {method.label}"
-        + (" (default)" if number == 1 else "")
-        for number, method in enumerate(spec.auth_methods, start=1)
+    default_method = detect_auth_method(spec, current)
+    choice = prompt.select(
+        "Auth method",
+        [(str(index), method.label) for index, method in enumerate(spec.auth_methods)],
+        default=str(default_method),
     )
-    while True:
-        choice = prompt.ask(f"Auth method\n{menu}")
-        if choice == "":
-            choice = "1"
-        # isdecimal, not isdigit: "²".isdigit() is True but int() rejects it
-        if choice.isdecimal() and 1 <= int(choice) <= len(spec.auth_methods):
-            method = spec.auth_methods[int(choice) - 1]
-            break
-        out(f"Choose 1-{len(spec.auth_methods)} (or press Enter for 1).")
-    for variable in method.variables:
-        while True:
-            answer = (
-                prompt.ask_secret(variable.prompt_label)
-                if variable.secret
-                else prompt.ask(variable.prompt_label)
-            )
-            if not answer:
-                out("Value is required.")
-                continue
-            # Every collected value is header-bound (Basic-auth usernames
-            # included), so every value gets the latin-1 entry check — the
-            # cryptic http.client failure must never survive the prompt.
-            try:
-                validate_credentials({variable.env_name: answer})
-            except ConfigError as error:
-                out(str(error))
-                continue
-            values[variable.env_name] = answer
-            break
+    method = spec.auth_methods[int(choice)]
 
-    while True:
-        answer = prompt.ask(
-            "Verify TLS certificates? [Y/n] (behind a corporate proxy with a "
-            "self-signed CA, answer n)",
-            default="y",
-        ).lower()
-        if answer in ("", "y"):
-            break
-        if answer == "n":
-            values[spec.ssl_var] = "false"
-            break
-        out("Please answer y or n.")
+    for variable in method.variables:
+        existing = current.get(variable.env_name)
+        if variable.secret:
+            if existing:
+                answer = prompt.secret(f"{variable.prompt_label} (Enter to keep current)")
+                values[variable.env_name] = answer if answer else existing
+            else:
+                values[variable.env_name] = prompt.secret(
+                    variable.prompt_label, validate=_credential_validator(variable.env_name)
+                )
+        else:
+            values[variable.env_name] = prompt.text(
+                variable.prompt_label,
+                default=existing,
+                validate=_credential_validator(variable.env_name),
+            )
+
+    verify_default = current.get(spec.ssl_var) != "false"
+    if not prompt.confirm(
+        "Verify TLS certificates? (answer No behind a corporate proxy with "
+        "a self-signed CA)",
+        default=verify_default,
+    ):
+        values[spec.ssl_var] = "false"
     return values
 
 
-def choose_scope(prompt: Prompt, out: Callable[[str], None] = print) -> str:
+def choose_scope(prompt: Prompt) -> str:
     """Project vs global; global is the default — credentials inside a repo
     risk accidental commits."""
-    while True:
-        answer = prompt.ask("Scope\n1) global — ~/.config/atli + home harness settings (default)\n2) project — ./.atli.toml + repo harness settings")
-        if answer in ("", "1"):
-            return "global"
-        if answer == "2":
-            return "project"
-        out("Choose 1 (global) or 2 (project).")
+    return prompt.select(
+        "Config scope",
+        (
+            ("global", "Global — ~/.config/atli/config.toml + home harness settings"),
+            ("project", "Project — ./.atli.toml + repo harness settings"),
+        ),
+        default="global",
+    )
 
 
-def choose_profile_name(
-    service: str, prompt: Prompt, out: Callable[[str], None] = print
-) -> str:
+def choose_profile_name(service: str, prompt: Prompt) -> str:
     """Profile name, defaulting to the service name."""
-    while True:
-        name = prompt.ask("Profile name", default=service)
-        if name == "":
-            name = service
-        error = validate_profile_name(name)
-        if error is None:
-            return name
-        out(error)
+    return prompt.text(
+        "Profile name", default=service, validate=validate_profile_name
+    )
 
 
-def choose_harness(
-    prompt: Prompt, home: Path, out: Callable[[str], None] = print
-) -> str | None:
+_SKIP_HARNESS = "__skip__"
+
+
+def choose_harness(prompt: Prompt, home: Path) -> str | None:
     """Pick a harness for the SessionStart hook, or skip.
 
     Supported harnesses in registry order; a detected config dir under
-    ``home`` marks (detected) and makes that harness the Enter default —
-    falling back to claude. ``s`` skips the hook entirely.
+    ``home`` marks (detected) and makes that harness the default — falling
+    back to claude. The skip choice defers to ``atli prime --install``.
     """
     from mcp_atlassian_cli.install import HARNESSES
 
     supported = [h for h in HARNESSES.values() if h.supported]
     detected = [h for h in supported if (home / h.detect_dir_name).exists()]
-    default = detected[0] if detected else supported[0]
-    menu = "\n".join(
-        f"{number}) {h.name}"
-        + (" (detected)" if h in detected else "")
-        + (" (default)" if h is default else "")
-        for number, h in enumerate(supported, start=1)
+    default = detected[0].name if detected else supported[0].name
+    choices = [
+        (h.name, f"{h.name} (detected)" if h in detected else h.name) for h in supported
+    ]
+    choices.append((_SKIP_HARNESS, "Skip for now — install later with `atli prime --install`"))
+    answer = prompt.select(
+        "Harness — install the SessionStart primer hook?", choices, default=default
     )
-    while True:
-        answer = prompt.ask(f"Harness — install the SessionStart primer hook?\n{menu}\ns) skip hook for now")
-        if answer == "":
-            return default.name
-        if answer.lower() == "s":
-            return None
-        if answer.isdecimal() and 1 <= int(answer) <= len(supported):
-            return supported[int(answer) - 1].name
-        out(f"Choose 1-{len(supported)} or s.")
+    return None if answer == _SKIP_HARNESS else answer
 
 
-def choose_service(prompt: Prompt, out: Callable[[str], None] = print) -> str:
-    """The bare ``atli init`` service menu; no default — a choice is owed."""
-    names = list(SERVICES)
-    menu = "\n".join(f"{n}) {name}" for n, name in enumerate(names, start=1))
-    while True:
-        answer = prompt.ask(f"Which service?\n{menu}")
-        if answer.isdecimal() and 1 <= int(answer) <= len(names):
-            return names[int(answer) - 1]
-        out(f"Choose 1-{len(names)}.")
+def choose_service(prompt: Prompt) -> str:
+    """The bare ``atli init`` service menu; the pointer starts at jira."""
+    return prompt.select(
+        "Which service?",
+        [(name, name.title()) for name in SERVICES],
+    )
 
 
 def render_summary(
@@ -586,17 +675,20 @@ def render_summary(
     harness: str | None,
     scope: str,
 ) -> str:
-    """The pre-flight confirmation: everything about to be written, secrets
-    masked with a fixed-length ``****`` (no length leak)."""
+    """The pre-write confirmation: everything about to be written. Secrets
+    (values collected hidden) mask as a fixed-length ``****`` — no length
+    leak; everything else, usernames included, shows as entered so it can
+    actually be confirmed. Verification already succeeded by the time this
+    renders, and the summary says so."""
+    secrets = _secret_keys(service)
     lines = [f"Service: {service}"]
     for key, value in values.items():
-        masked = key.endswith(CREDENTIAL_SUFFIXES)
-        lines.append(f"{key}: {mask(value) if masked else value}")
+        lines.append(f"{key}: {'****' if key in secrets else value}")
     lines.append(f"Config: {config_path}")
     lines.append(f"Profile: {profile_name}")
     lines.append(f"Scope: {scope}")
-    lines.append(f"hook: {harness if harness is not None else 'skipped'}")
-    lines.append("Next: verify with one live read-only call, then write.")
+    lines.append(f"Harness: {harness if harness is not None else 'skipped'}")
+    lines.append("Verified: yes — one live read-only call succeeded")
     return "\n".join(lines)
 
 
@@ -634,6 +726,53 @@ _EXAMPLE_COMMAND: dict[str, str] = {
 }
 
 
+def _load_existing_profile(
+    config_path: Path,
+    profile_name: str,
+) -> tuple[str, dict[str, str], str | None]:
+    """Read the target config for prefill: its text, the named profile's
+    current values (flat strings), and the existing ``default_profile``.
+
+    An unparsable file — or a ``profiles`` key that is not a table, the
+    same shape rule :func:`config.load_config` enforces — is a hard stop:
+    the wizard refuses to prefill from, or merge into, a file it cannot
+    understand (a clean exit-2 message beats a corrupted write). Value
+    coercion mirrors runtime too: booleans become ``"true"``/``"false"``
+    (NOT Python's ``"True"``, which would break the TLS-answer default),
+    numbers their decimal strings; values of any other type are skipped
+    rather than fatal — runtime's ``load_config`` will name them if the
+    user ever tries to run with that profile.
+    """
+    try:
+        text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    except (OSError, UnicodeDecodeError) as error:
+        raise ConfigError(f"Could not read config file '{config_path}': {error}") from error
+    if not text:
+        return "", {}, None
+    try:
+        data = tomllib.loads(text)
+    except TOMLDecodeError as error:
+        raise ConfigError(
+            f"Could not parse existing config '{config_path}': {error}. "
+            "Fix the file (`atli profiles` shows what currently loads) and "
+            "re-run init."
+        ) from error
+    raw_profiles = data.get("profiles", {})
+    if not isinstance(raw_profiles, dict):
+        raise ConfigError(
+            f"Invalid config file '{config_path}': 'profiles' must be a "
+            "table of [profiles.<name>] tables."
+        )
+    section = raw_profiles.get(profile_name)
+    current = {
+        key: ("true" if value else "false") if isinstance(value, bool) else str(value)
+        for key, value in section.items()
+        if isinstance(value, (str, int, float, bool))
+    } if isinstance(section, dict) else {}
+    default = data.get("default_profile")
+    return text, current, default if isinstance(default, str) else None
+
+
 def run_init(
     service: str,
     *,
@@ -646,6 +785,10 @@ def run_init(
 ) -> int:
     """The whole ``atli init <service>`` wizard; returns the process exit code.
 
+    Flow: scope and profile name first (they decide which file is edited),
+    then the profile's values — prefilled from the existing section when
+    there is one — then the live verification, and only then the summary:
+    confirm means "write it", with nothing left between yes and the write.
     Nothing touches disk until the live verification succeeds — a declined
     confirm or an aborted recovery leaves the machine exactly as it was.
     Exit codes: 0 success (a clean decline included); 1 verification
@@ -671,114 +814,84 @@ def run_init(
     owned_keys = {spec.url_var, spec.ssl_var} | {
         variable.env_name for method in spec.auth_methods for variable in method.variables
     }
-    keep_url: str | None = None
-    while True:
-        values = collect_profile(service, prompt, out, keep_url=keep_url)
-        scope = choose_scope(prompt, out)
-        if scope == "project":
-            out(
-                "Tip: add .atli.toml to your repository's .gitignore — "
-                "it holds plaintext credentials."
-            )
-        profile_name = choose_profile_name(service, prompt, out)
-        harness = choose_harness(prompt, home, out)
-        try:
-            config_path = config_target_path(scope, environ=environ, home=home, cwd=cwd)
-        except ConfigError as error:
-            out(str(error))
-            return 2
-        if scope == "project" and environ.get("ATLI_CONFIG"):
-            out(
-                f"Note: $ATLI_CONFIG ({environ['ATLI_CONFIG']}) is set — at "
-                "runtime it outranks ./.atli.toml, so this profile will not "
-                "be the one atli loads unless you unset it."
-            )
+
+    scope = choose_scope(prompt)
+    if scope == "project":
         out(
-            render_summary(
-                service,
-                values,
-                config_path=config_path,
-                profile_name=profile_name,
-                harness=harness,
-                scope=scope,
-            )
+            "Tip: add .atli.toml to your repository's .gitignore — "
+            "it holds plaintext credentials."
         )
-        while True:
-            proceed = prompt.ask("Proceed? [Y/n]", default="y").lower()
-            if proceed in ("", "y"):
-                break
-            if proceed == "n":
-                out("Nothing written.")
-                return 0
-            out("Please answer y or n.")
+    profile_name = choose_profile_name(service, prompt)
+    try:
+        config_path = config_target_path(scope, environ=environ, home=home, cwd=cwd)
+        existing, current, previous_default = _load_existing_profile(config_path, profile_name)
+    except ConfigError as error:
+        out(str(error))
+        return 2
+    if scope == "project" and environ.get("ATLI_CONFIG"):
+        out(
+            f"Note: $ATLI_CONFIG ({environ['ATLI_CONFIG']}) is set — at "
+            "runtime atli prefers it over ./.atli.toml (and errors if it "
+            "points at a missing file), so this profile will not be the "
+            "one atli loads unless you unset it."
+        )
+    if scope == "global" and (cwd / ".atli.toml").is_file():
+        out(
+            "Note: a ./.atli.toml exists in this directory — at runtime it "
+            "outranks the global config, so commands run from here keep "
+            "loading the project profile."
+        )
+
+    values = collect_profile(service, prompt, current=current)
+    while True:
         try:
+            out(f"Verifying — one read-only call to {spec.verify_tool} …")
             verify_profile(service, values, environ, runner_factory=runner_factory)
         except (ToolCallFailure, ToolRunnerError) as error:
             out(str(error))
-            while True:
-                answer = prompt.ask(
-                    "1) Re-enter credentials (same URL)  2) Change URL  3) Abort"
-                )
-                if answer == "1":
-                    keep_url = values[spec.url_var]
-                    break
-                if answer == "2":
-                    keep_url = None
-                    break
-                if answer == "3":
-                    return 1
-                out("Choose 1, 2, or 3.")
+            action = prompt.select(
+                "Verification failed",
+                (
+                    ("retry", "Re-enter credentials (same URL)"),
+                    ("url", "Change URL"),
+                    ("abort", "Abort"),
+                ),
+                default="retry",
+            )
+            if action == "abort":
+                return 1
+            keep_url = values[spec.url_var] if action == "retry" else None
+            values = collect_profile(
+                service, prompt, current=current, keep_url=keep_url
+            )
             continue
         break
 
-    try:
-        existing = (
-            config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    harness = choose_harness(prompt, home)
+    out(
+        render_summary(
+            service,
+            values,
+            config_path=config_path,
+            profile_name=profile_name,
+            harness=harness,
+            scope=scope,
         )
-    except (OSError, UnicodeDecodeError) as error:
-        out(str(ConfigError(f"Could not read config file '{config_path}': {error}")))
-        return 2
-    try:
-        previous_default = tomllib.loads(existing).get("default_profile") if existing else None
-    except TOMLDecodeError:
-        previous_default = None
-    superseded = owned_keys - set(values)
-    merged = ensure_default_profile(
-        merge_profile_text(existing, profile_name, values, drop=superseded),
-        profile_name,
     )
-    # Parse guard: this layer's whole contract is "never corrupt the
-    # user's file", so the merged text is proven to parse AND to carry
-    # exactly what this run collected before a single byte is written —
-    # a surgery regression becomes a clean refusal, never a broken config.
+    if not prompt.confirm("Write this configuration?", default=True):
+        out("Nothing written.")
+        return 0
+
     try:
-        written_profile = tomllib.loads(merged)["profiles"][profile_name]
-    except (TOMLDecodeError, KeyError) as error:
-        out(
-            str(
-                ConfigError(
-                    f"Refusing to write '{config_path}': the merged profile "
-                    f"does not parse ({error!r}). Your file is unchanged — "
-                    "please report this as an atli bug."
-                )
-            )
+        merged = upsert_profile(
+            existing, profile_name, values, owned_keys - set(values)
         )
-        return 2
-    expected = dict(values)
-    if any(written_profile.get(key) != value for key, value in expected.items()):
-        out(
-            str(
-                ConfigError(
-                    f"Refusing to write '{config_path}': the merged profile "
-                    "does not carry exactly the collected values. Your file "
-                    "is unchanged — please report this as an atli bug."
-                )
-            )
-        )
+    except ConfigError as error:
+        out(str(error))
         return 2
     write_config(config_path, merged)
     out(f"config: {config_path} (profile '{profile_name}', chmod 600)")
-    if isinstance(previous_default, str) and previous_default != profile_name:
+    if previous_default is not None and previous_default != profile_name:
         out(f"default profile: '{previous_default}' (unchanged)")
     if harness is not None:
         try:
